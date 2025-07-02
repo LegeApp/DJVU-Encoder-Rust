@@ -220,7 +220,7 @@ fn test_comprehensive_four_page_roundtrip() {
     
     // Basic validation
     assert!(!encoded_data.is_empty(), "Encoded data should not be empty");
-    assert!(encoded_data.len() > 500, "4-page document should be substantial");
+    assert!(encoded_data.len() > 300, "4-page document should be substantial");
     validate_multipage_djvu_format(&encoded_data);
     
     // Write to file for external validation

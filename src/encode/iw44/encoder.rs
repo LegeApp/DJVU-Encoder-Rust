@@ -207,6 +207,7 @@ impl IWEncoder {
                     if std::env::var("DJVU_VERBOSE_LOG").unwrap_or_default() == "1" {
                         println!("IWEncoder::encode_chunk - Stopping due to decibel target reached");
                     }
+                    more = false;
                     break;
                 }
             }
@@ -216,6 +217,7 @@ impl IWEncoder {
                     if std::env::var("DJVU_VERBOSE_LOG").unwrap_or_default() == "1" {
                         println!("IWEncoder::encode_chunk - Stopping due to byte target reached");
                     }
+                    more = false;
                     break;
                 }
             }
@@ -225,6 +227,7 @@ impl IWEncoder {
                     if std::env::var("DJVU_VERBOSE_LOG").unwrap_or_default() == "1" {
                         println!("IWEncoder::encode_chunk - Stopping due to slice target reached");
                     }
+                    more = false;
                     break;
                 }
             }
@@ -259,6 +262,7 @@ impl IWEncoder {
                     println!("IWEncoder::encode_chunk - Safety break after {} iterations (max_slices={})", loop_count, max_slices);
                 }
                 eprintln!("Warning: Slice cap {} reached, aborting chunk early", max_slices);
+                more = false;
                 break;
             }
         }

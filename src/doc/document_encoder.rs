@@ -53,9 +53,16 @@ impl DocumentEncoder {
         let dpm = (self.dpi * 100 / 254) as u32; // Dots per meter
         let rotation = 1; // Default rotation
 
-        let encoded_page_bytes =
+        let mut encoded_page_bytes =
             page_components.encode(&self.params, page_num, dpm, rotation, self.gamma)?;
-        
+
+        // For multi-page documents we store the inner FORM:DJVU without the
+        // leading AT&T magic. Single page documents expect "AT&TFORM", but
+        // within a DJVM container only the FORM is stored.
+        if encoded_page_bytes.starts_with(b"AT&TFORM") {
+            encoded_page_bytes = encoded_page_bytes.split_off(4);
+        }
+
         self.pages.push(encoded_page_bytes);
         Ok(())
     }
