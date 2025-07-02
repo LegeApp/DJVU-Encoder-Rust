@@ -10,9 +10,9 @@
 //! Add `tracing` and `tracing-subscriber` to your `Cargo.toml`.
 //! Before using the library, initialize the subscriber:
 //!
-//! ```
+//! ```ignore
 //! // In your main.rs or a test setup
-//! djvu_encoder::log::init_subscriber(tracing::Level::DEBUG);
+//! djvu_encoder::utils::log::init_subscriber(tracing::Level::DEBUG);
 //! ```
 //!
 //! Then use the logging macros throughout the code:
