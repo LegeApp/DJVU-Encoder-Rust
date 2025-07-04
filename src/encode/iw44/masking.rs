@@ -1,7 +1,7 @@
 // src/iw44/masking.rs
 
-use crate::encode::iw44::transform::{Encode, Decode};
-use crate::image::image_formats::{DjvuImageExt, Bitmap};
+use crate::encode::iw44::transform::{Decode, Encode};
+use crate::image::image_formats::{Bitmap, DjvuImageExt};
 use ::image::GrayImage;
 
 /// Performs the “interpolate_mask” step from IW44: fill in masked-out
@@ -156,7 +156,7 @@ pub fn forward_mask(
         }
 
         // reconstruct back to pixel domain
-        Decode::backward(&mut scratch, w, h, w, scale*2, scale);
+        Decode::backward(&mut scratch, w, h, w, scale * 2, scale);
 
         // restore visible pixels so they remain exact
         for y in (0..h).step_by(scale) {

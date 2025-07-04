@@ -5,10 +5,10 @@ use crate::iff::iff::{IffReaderExt, IffWriter, IffWriterExt};
 use crate::utils::error::Result;
 use crate::DjvuError;
 use byteorder::{BigEndian, WriteBytesExt};
-use std::sync::Arc;
 use std::collections::HashMap;
 use std::fs::File as StdFile;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::sync::Arc;
 
 use url::Url;
 
@@ -80,8 +80,13 @@ impl DjVuDocument {
         let _dict_builder = SymDictBuilder::new(0);
         let dict_data = DataPool::from_vec(Vec::new());
         doc.insert_file(
-            DjVuFile::new("shared_anno.iff", "shared_anno.iff", "shared_anno.iff", FileType::SharedAnno),
-            dict_data
+            DjVuFile::new(
+                "shared_anno.iff",
+                "shared_anno.iff",
+                "shared_anno.iff",
+                FileType::SharedAnno,
+            ),
+            dict_data,
         )?;
 
         if pages.len() > 10 {
@@ -93,11 +98,7 @@ impl DjVuDocument {
                     let page_num = i + 1;
                     let page_filename = format!("p{:04}.djvu", page_num);
                     let (width, height) = page_components.dimensions();
-                    let rotation = if width >= height {
-                        1
-                    } else {
-                        1
-                    };
+                    let rotation = if width >= height { 1 } else { 1 };
                     let gamma = Some(2.2);
                     let params = crate::doc::page_encoder::PageEncodeParams::default();
                     let encoded_data =
@@ -119,11 +120,7 @@ impl DjVuDocument {
                 let page_num = i + 1;
                 let page_filename = format!("p{:04}.djvu", page_num);
                 let (width, height) = page_components.dimensions();
-                let rotation = if width >= height {
-                    1
-                } else {
-                    1
-                };
+                let rotation = if width >= height { 1 } else { 1 };
                 let gamma = Some(2.2);
                 let params = crate::doc::page_encoder::PageEncodeParams::default();
                 let encoded_data =
@@ -142,12 +139,7 @@ impl DjVuDocument {
 
     /// Adds a page to the document.
     pub fn add_page(&mut self, page_id: String, page_data: Vec<u8>) -> Result<()> {
-        let file = DjVuFile::new(
-            &page_id,
-            &page_id,
-            "",
-            FileType::Page,
-        );
+        let file = DjVuFile::new(&page_id, &page_id, "", FileType::Page);
         let data_pool = DataPool::from_vec(page_data);
         self.insert_file(file, data_pool)?;
         Ok(())
@@ -201,8 +193,12 @@ impl DjVuDocument {
                 let mut reader = get_data(&include_id_str)?;
                 reader.read_to_end(&mut include_data)?;
 
-                let include_file =
-                    DjVuFile::new(&include_id_str, &include_id_str, &include_id_str, FileType::Include);
+                let include_file = DjVuFile::new(
+                    &include_id_str,
+                    &include_id_str,
+                    &include_id_str,
+                    FileType::Include,
+                );
 
                 self.insert_file_with_includes(include_file, include_data, get_data)?;
             }
@@ -221,7 +217,7 @@ impl DjVuDocument {
         iff_writer.put_chunk("FORM:DJVM")?;
 
         // Create a mutable copy of the directory to update offsets
-                let dir_to_write = self.dir.as_ref().clone();
+        let dir_to_write = self.dir.as_ref().clone();
 
         // --- Pre-pass to calculate offsets ---
         // First, calculate the size of the DIRM and NAVM chunks to find the starting offset for file data.
@@ -242,7 +238,7 @@ impl DjVuDocument {
 
         // Create a map of file IDs to offsets
         let mut offset_map = HashMap::new();
-        
+
         // First pass: collect all file IDs and their new offsets
         for file in dir_to_write.get_files_list() {
             if let Some(data_pool) = self.data.get(&file.id) {
@@ -263,7 +259,7 @@ impl DjVuDocument {
         // --- Writing Pass ---
         // Create a new directory with the updated offsets
         let dir_with_offsets = dir_to_write.clone_with_new_offsets(&offset_map);
-        
+
         // Now encode the directory with correct offsets
         let mut final_dirm_buf = Vec::new();
         dir_with_offsets.encode_explicit(&mut Cursor::new(&mut final_dirm_buf), true, true)?;

@@ -46,4 +46,3 @@ mod tests {
         assert_eq!(DJVU_VERSION, "0.1.0");
     }
 }
-

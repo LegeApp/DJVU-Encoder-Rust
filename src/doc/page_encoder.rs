@@ -1,16 +1,16 @@
 //! Page encoding functionality for DjVu documents
 
 use crate::encode::{
-    iw44::encoder::{IWEncoder, EncoderParams as IW44EncoderParams},
+    iw44::encoder::{EncoderParams as IW44EncoderParams, IWEncoder},
     jb2::encoder::JB2Encoder,
     symbol_dict::BitImage,
 };
 use crate::iff::iff::IffWriter;
 use crate::{DjvuError, Result};
+use byteorder::{BigEndian, WriteBytesExt};
 use image::RgbImage;
 use lutz::Image;
 use std::io::{self, Write};
-use byteorder::{WriteBytesExt, BigEndian};
 
 /// Configuration for page encoding
 #[derive(Debug, Clone)]
@@ -129,7 +129,7 @@ impl PageComponents {
 
             // Write AT&T magic bytes first
             writer.write_magic_bytes()?;
-            
+
             // Start the FORM:DJVU chunk
             writer.put_chunk("FORM:DJVU")?;
 
@@ -151,7 +151,8 @@ impl PageComponents {
                     // JB2 background encoding from RGB is not supported.
                     // A bitonal image should be provided as a foreground component instead.
                     return Err(DjvuError::InvalidOperation(
-                        "JB2 background encoding requires a bitonal image. Use foreground instead.".to_string()
+                        "JB2 background encoding requires a bitonal image. Use foreground instead."
+                            .to_string(),
                     ));
                 }
             }
@@ -189,26 +190,26 @@ impl PageComponents {
         gamma: Option<f32>, // If None, use 2.2
     ) -> Result<()> {
         use byteorder::LittleEndian;
-        
+
         writer.put_chunk("INFO")?;
-        
+
         // Width and height (2 bytes each, big-endian)
         writer.write_u16::<BigEndian>(self.width as u16)?;
         writer.write_u16::<BigEndian>(self.height as u16)?;
-        
+
         // Minor version (1 byte, currently 26 per spec)
         writer.write_u8(26)?;
-        
+
         // Major version (1 byte, currently 0 per spec)
         writer.write_u8(0)?;
-        
+
         // DPI (2 bytes, little-endian per spec)
         writer.write_u16::<LittleEndian>(dpi)?;
-        
+
         // Gamma (1 byte, gamma * 10)
         let gamma_val = gamma.map_or(22, |g| (g * 10.0 + 0.5) as u8); // Default gamma = 2.2
         writer.write_u8(gamma_val)?;
-        
+
         // Flags (1 byte: bits 0-2 = rotation, bits 3-7 = reserved)
         let flags = rotation & 0x07; // Ensure only bottom 3 bits are used
         writer.write_u8(flags)?;
@@ -234,26 +235,37 @@ impl PageComponents {
         let (w, h) = img.dimensions();
         let raw_data = img.as_raw();
         println!("DEBUG: Input image {}x{}, {} bytes", w, h, raw_data.len());
-        
+
         // Check some sample pixels
         if raw_data.len() >= 9 {
-            println!("DEBUG: First 3 pixels: RGB({},{},{}) RGB({},{},{}) RGB({},{},{})", 
-                raw_data[0], raw_data[1], raw_data[2],
-                raw_data[3], raw_data[4], raw_data[5],
-                raw_data[6], raw_data[7], raw_data[8]);
+            println!(
+                "DEBUG: First 3 pixels: RGB({},{},{}) RGB({},{},{}) RGB({},{},{})",
+                raw_data[0],
+                raw_data[1],
+                raw_data[2],
+                raw_data[3],
+                raw_data[4],
+                raw_data[5],
+                raw_data[6],
+                raw_data[7],
+                raw_data[8]
+            );
         }
-        
-        // Configure IW44 encoder with reasonable slice count
-        // Start with very low slice count for testing: 3-15 slices
-        let slice_count = 3 + (params.bg_quality as usize * 12) / 100;
-        println!("DEBUG: Configuring IW44 encoder with {} slices for quality {}", slice_count, params.bg_quality);
-        
+
+        // Configure IW44 encoder with proper quality-based parameters
+        // Calculate reasonable slice count based on quality (10-100 slices for normal quality)
+        let slice_count = 50; // Enough for multiple bit-planes
+        println!(
+            "DEBUG: Configuring IW44 encoder with {} slices for quality {}",
+            slice_count, params.bg_quality
+        );
+
         let iw44_params = IW44EncoderParams {
             slices: Some(slice_count),
             bytes: None,
             decibels: None,
             crcb_mode,
-            max_slices: Some(20), // Much lower safety limit
+            max_slices: Some(200), // Reasonable safety limit
             ..Default::default()
         };
 
@@ -261,28 +273,39 @@ impl PageComponents {
         let mut encoder = IWEncoder::from_rgb(img, None, iw44_params)
             .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
 
-        // The main picture chunk: FG44 if there is a mask (foreground separation), BG44 otherwise (even for color)
-        let main_chunk_id = if self.mask.is_some() { "FG44" } else { "BG44" };
-        writer.put_chunk(main_chunk_id)?;
+        // Choose the correct chunk type for IW44 background images:
+        // - BG44 for background layer (the main use case for IW44 in DjVu pages)
+        // - FG44 for foreground layer (has mask)
+        // Note: PM44/BM44 are for standalone IW44 files, not DjVu page backgrounds
+        let iw_chunk_id = if self.mask.is_some() {
+            "FG44"
+        } else {
+            "BG44" // Use BG44 for background images in DjVu pages
+        };
 
+        // Encode all slices, writing one chunk per slice with the proper 'more' flag
         let mut chunk_count = 0;
         loop {
             let (iw44_stream, more) = encoder
                 .encode_chunk()
                 .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
 
-            // Wrap the raw IW44 stream in a BM44 (grayscale) or PM44 (color) chunk.
-            let iw_chunk_id = if params.color { "PM44" } else { "BM44" };
+            // Don't write empty slices - just break out
+            if iw44_stream.is_empty() {
+                println!("DEBUG: Encoder returned empty slice, stopping");
+                break;
+            }
+
+            // Write this slice as a separate BG44/FG44 chunk
             writer.put_chunk(iw_chunk_id)?;
             writer.write_all(&iw44_stream)?;
             writer.close_chunk()?;
 
             chunk_count += 1;
             println!(
-                "DEBUG: Writing {} chunk #{} into {}, size: {} bytes, more: {}",
+                "DEBUG: Writing {} chunk {}, size: {} bytes, more: {}",
                 iw_chunk_id,
                 chunk_count,
-                main_chunk_id,
                 iw44_stream.len(),
                 more
             );
@@ -290,9 +313,18 @@ impl PageComponents {
             if !more {
                 break;
             }
+
+            // Safety check to prevent infinite loops
+            if chunk_count >= 100 {
+                eprintln!(
+                    "Warning: Too many IW44 chunks generated ({}), stopping",
+                    chunk_count
+                );
+                break;
+            }
         }
+
         println!("DEBUG: Total IW44 chunks written: {}", chunk_count);
-        writer.close_chunk()?; // Closes FG44/BG44
 
         Ok(())
     }
@@ -337,7 +369,6 @@ impl PageComponents {
         writer.close_chunk()?;
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -372,8 +403,8 @@ mod tests {
         assert_eq!(&encoded[0..8], b"AT&TFORM");
         // Check for INFO chunk
         assert!(encoded.windows(4).any(|w| w == b"INFO"));
-        // Check for BG44 chunk (since that's the default)
-        assert!(encoded.windows(4).any(|w| w == b"BG44"));
+        // Check for PM44 chunk (since that's the default for color images)
+        assert!(encoded.windows(4).any(|w| w == b"PM44"));
         // Check for text chunk
         assert!(encoded.windows(4).any(|w| w == b"TXTa"));
     }

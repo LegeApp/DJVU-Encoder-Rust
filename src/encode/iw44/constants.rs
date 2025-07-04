@@ -2,7 +2,7 @@
 
 //! Constants for IW44 encoding - re-exports from the main image coefficients module
 //!
-//! This module provides access to the same constants that are defined in the 
+//! This module provides access to the same constants that are defined in the
 //! centralized image::coefficients module to avoid duplication.
 
 // Re-export the constants from the centralized location

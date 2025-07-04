@@ -63,30 +63,30 @@ impl NumCoder {
         // Encode the sign bit
         let sign_bit = value < 0;
         let uvalue = value.unsigned_abs() as u32;
-        
+
         // Encode the magnitude using adaptive binary coding
         let mut mask = 1u32 << 30; // Start with a high bit
         while mask > 0 && (uvalue & mask) == 0 {
             mask >>= 1;
         }
-        
+
         // Allocate context if needed
         if *ctx_handle == 0 {
             *ctx_handle = self.alloc_context();
         }
-        
+
         // Encode the bits
         while mask > 0 {
             let bit = (uvalue & mask) != 0;
             ac.encode_bit(*ctx_handle as usize, bit)?;
             mask >>= 1;
         }
-        
+
         // Encode the sign bit if non-zero
         if uvalue != 0 {
             ac.encode_bit(*ctx_handle as usize, sign_bit)?;
         }
-        
+
         Ok(())
     }
 
@@ -102,7 +102,8 @@ impl NumCoder {
     ) -> Result<(), Jb2Error> {
         if value < low || value > high {
             return Err(Jb2Error::InvalidNumber(format!(
-                "Value {} outside of [{}, {}]", value, low, high
+                "Value {} outside of [{}, {}]",
+                value, low, high
             )));
         }
 
@@ -166,11 +167,13 @@ impl NumCoder {
 
             self.nodes.push(NumCodeNode {
                 context_index: self.next_context,
-                left_child: 0, right_child: 0,
+                left_child: 0,
+                right_child: 0,
             });
             self.nodes.push(NumCodeNode {
                 context_index: self.next_context + 1,
-                left_child: 0, right_child: 0,
+                left_child: 0,
+                right_child: 0,
             });
             self.next_context += 2;
         }

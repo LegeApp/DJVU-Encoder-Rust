@@ -8,19 +8,21 @@ use crate::arithmetic_coder::ArithmeticEncoder;
 use crate::arithtable::MQ_STATE_TABLE;
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::record::RecordStreamEncoder;
-use crate::encode::jb2::symbol_dict::{BitImage, ConnectedComponent, SymDictBuilder, SymDictEncoder};
+use crate::encode::jb2::symbol_dict::{
+    BitImage, ConnectedComponent, SymDictBuilder, SymDictEncoder,
+};
 use crate::utils::write_ext::WriteBytesExtU24;
 use byteorder::BigEndian;
-use std::io::{Write, Cursor};
+use std::io::{Cursor, Write};
 
 // Context partitioning for the JB2 encoder.
 // We need separate context pools for different parts of the encoding process.
 
 // 1. Contexts for direct bitmap coding (10-bit context).
 const DIRECT_BITMAP_CONTEXTS: u32 = 1 << 10; // 1024 contexts
-// 2. Contexts for refinement bitmap coding (13-bit context).
+                                             // 2. Contexts for refinement bitmap coding (13-bit context).
 const REFINEMENT_BITMAP_CONTEXTS: u32 = 1 << 13; // 8192 contexts
-// 3. Contexts for the symbol dictionary's number coder.
+                                                 // 3. Contexts for the symbol dictionary's number coder.
 const SYM_DICT_NC_CONTEXTS: u32 = 64;
 // 4. Contexts for the record stream's number coder.
 const RECORD_STREAM_NC_CONTEXTS: u32 = 128;
@@ -34,7 +36,6 @@ const RECORD_STREAM_NC_BASE: u32 = SYM_DICT_NC_BASE + SYM_DICT_NC_CONTEXTS;
 // Total number of contexts required by the arithmetic coder.
 const TOTAL_CONTEXTS: u32 = RECORD_STREAM_NC_BASE + RECORD_STREAM_NC_CONTEXTS;
 
-
 /// The main JB2 encoder.
 pub struct JB2Encoder<W: Write> {
     writer: W,
@@ -45,12 +46,13 @@ pub struct JB2Encoder<W: Write> {
 impl<W: Write> JB2Encoder<W> {
     /// Creates a new JB2 encoder that writes to the given writer.
     pub fn new(writer: W) -> Self {
-        let sym_dict_encoder = SymDictEncoder::new(
-            SYM_DICT_NC_BASE,
-            SYM_DICT_NC_CONTEXTS,
-            DIRECT_BITMAP_BASE,
-        );
-        Self { writer, sym_dict_encoder, dictionary: Vec::new() }
+        let sym_dict_encoder =
+            SymDictEncoder::new(SYM_DICT_NC_BASE, SYM_DICT_NC_CONTEXTS, DIRECT_BITMAP_BASE);
+        Self {
+            writer,
+            sym_dict_encoder,
+            dictionary: Vec::new(),
+        }
     }
 
     /// Encodes a single page from a bitmap image.
@@ -85,7 +87,12 @@ impl<W: Write> JB2Encoder<W> {
         let chunk_data = {
             let mut buffer = Cursor::new(Vec::new());
             {
-                                                let mut ac = ArithmeticEncoder::<_, { TOTAL_CONTEXTS as usize }>::new(&mut buffer, &MQ_STATE_TABLE, TOTAL_CONTEXTS as usize, true)?;
+                let mut ac = ArithmeticEncoder::<_, { TOTAL_CONTEXTS as usize }>::new(
+                    &mut buffer,
+                    &MQ_STATE_TABLE,
+                    TOTAL_CONTEXTS as usize,
+                    true,
+                )?;
                 self.sym_dict_encoder.encode(&mut ac, dictionary)?;
                 ac.flush(true)?;
             }
@@ -101,11 +108,19 @@ impl<W: Write> JB2Encoder<W> {
     }
 
     /// Encodes and writes the Sjbz (page data) chunk.
-    fn encode_page_chunk(&mut self, components: &[ConnectedComponent]) -> Result<Vec<u8>, Jb2Error> {
+    fn encode_page_chunk(
+        &mut self,
+        components: &[ConnectedComponent],
+    ) -> Result<Vec<u8>, Jb2Error> {
         let chunk_data = {
             let mut buffer = Cursor::new(Vec::new());
             {
-                                                let mut ac = ArithmeticEncoder::<_, { TOTAL_CONTEXTS as usize }>::new(&mut buffer, &MQ_STATE_TABLE, TOTAL_CONTEXTS as usize, true)?;
+                let mut ac = ArithmeticEncoder::<_, { TOTAL_CONTEXTS as usize }>::new(
+                    &mut buffer,
+                    &MQ_STATE_TABLE,
+                    TOTAL_CONTEXTS as usize,
+                    true,
+                )?;
                 let mut record_encoder = RecordStreamEncoder::new(
                     RECORD_STREAM_NC_BASE,
                     RECORD_STREAM_NC_CONTEXTS,
@@ -120,7 +135,12 @@ impl<W: Write> JB2Encoder<W> {
                     // exact match for the dictionary symbol, we must use refinement.
                     let is_refinement = component.bitmap != *reference_symbol;
 
-                    record_encoder.code_record(&mut ac, component, &self.dictionary, is_refinement)?;
+                    record_encoder.code_record(
+                        &mut ac,
+                        component,
+                        &self.dictionary,
+                        is_refinement,
+                    )?;
                 }
 
                 ac.flush(true)?;

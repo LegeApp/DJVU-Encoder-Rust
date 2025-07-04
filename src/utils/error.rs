@@ -1,6 +1,6 @@
+use std::error::Error;
 use std::fmt;
 use std::io;
-use std::error::Error;
 
 /// Main error type for the DjVu encoder library.
 #[derive(Debug)]
@@ -76,27 +76,27 @@ mod tests {
             DjvuError::Io(io_error).to_string(),
             "I/O error: file not found"
         );
-        
+
         assert_eq!(
             DjvuError::InvalidArg("test".to_string()).to_string(),
             "Invalid argument: test"
         );
-        
+
         assert_eq!(
             DjvuError::InvalidOperation("test".to_string()).to_string(),
             "Invalid operation: test"
         );
-        
+
         assert_eq!(
             DjvuError::ValidationError("test".to_string()).to_string(),
             "Validation error: test"
         );
-        
+
         assert_eq!(
             DjvuError::Stream("test".to_string()).to_string(),
             "Stream error: test"
         );
-        
+
         assert_eq!(
             DjvuError::Custom("test".to_string()).to_string(),
             "Error: test"

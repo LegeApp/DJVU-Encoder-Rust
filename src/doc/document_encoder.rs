@@ -92,16 +92,20 @@ impl DocumentEncoder {
         }
 
         // Multi-page document, construct a DJVM file.
-        let page_chunks: Vec<Vec<u8>> = self.pages.iter().map(|p| {
-            if p.starts_with(b"AT&TFORM") {
-                // Strip the "AT&T" part for inclusion in a DJVM file.
-                // The page data should start with "FORM".
-                p[4..].to_vec()
-            } else {
-                // Assume it's already a valid FORM chunk.
-                p.clone()
-            }
-        }).collect();
+        let page_chunks: Vec<Vec<u8>> = self
+            .pages
+            .iter()
+            .map(|p| {
+                if p.starts_with(b"AT&TFORM") {
+                    // Strip the "AT&T" part for inclusion in a DJVM file.
+                    // The page data should start with "FORM".
+                    p[4..].to_vec()
+                } else {
+                    // Assume it's already a valid FORM chunk.
+                    p.clone()
+                }
+            })
+            .collect();
 
         // First, let's calculate the exact structure and offsets
         // The DJVM structure is:
@@ -109,32 +113,35 @@ impl DocumentEncoder {
 
         // Create the DIRM with actual files and proper offsets
         let dirm = DjVmDir::new();
-        
+
         // Calculate where each page will be positioned
         // We need to calculate the DIRM size first, but this creates a circular dependency
         // Let's estimate conservatively and then adjust
-        
+
         // Estimate DIRM size: header(3) + offsets(4*num_pages) + compressed_data
         // For 2 pages, compressed data is roughly: sizes(6) + flags(2) + ids(~20) = ~28 bytes
         // After ZP compression, this could be 40-60 bytes, so let's estimate 80 bytes total
         let estimated_dirm_size = 3 + (4 * page_chunks.len()) + 80;
         let dirm_chunk_size = 8 + estimated_dirm_size + (estimated_dirm_size % 2); // Include chunk header + padding
-        
-        println!("DEBUG: Page chunk sizes: {:?}", page_chunks.iter().map(|p| p.len()).collect::<Vec<_>>());
-        
+
+        println!(
+            "DEBUG: Page chunk sizes: {:?}",
+            page_chunks.iter().map(|p| p.len()).collect::<Vec<_>>()
+        );
+
         // Calculate page offsets (relative to start of DJVM payload, after "DJVM")
         let mut current_offset = dirm_chunk_size as u32;
         let mut file_offsets = Vec::new();
-        
+
         for (i, page_chunk) in page_chunks.iter().enumerate() {
             // Ensure even alignment
             if current_offset % 2 != 0 {
                 current_offset += 1;
             }
-            
+
             file_offsets.push(current_offset);
             current_offset += page_chunk.len() as u32;
-            
+
             // Add the files to DIRM with calculated offsets
             let page_id = format!("p{:04}", i + 1);
             let file = File::new_with_offset(
@@ -145,7 +152,12 @@ impl DocumentEncoder {
                 file_offsets[i],
                 page_chunk.len() as u32,
             );
-            println!("DEBUG: Adding file {} with offset {} and size {}", page_id, file_offsets[i], page_chunk.len());
+            println!(
+                "DEBUG: Adding file {} with offset {} and size {}",
+                page_id,
+                file_offsets[i],
+                page_chunk.len()
+            );
             dirm.insert_file(file, -1)?;
         }
 
@@ -153,31 +165,36 @@ impl DocumentEncoder {
         let mut dirm_stream = crate::iff::byte_stream::MemoryStream::new();
         dirm.encode_explicit(&mut dirm_stream, true, true)?;
         let dirm_data = dirm_stream.into_vec();
-        
+
         println!("DEBUG: DIRM data size: {} bytes", dirm_data.len());
-        println!("DEBUG: First 20 bytes of DIRM: {:02X?}", &dirm_data[..dirm_data.len().min(20)]);
-        
+        println!(
+            "DEBUG: First 20 bytes of DIRM: {:02X?}",
+            &dirm_data[..dirm_data.len().min(20)]
+        );
+
         // Check if our estimate was close enough - if not, recalculate
         let actual_dirm_chunk_size = 8 + dirm_data.len() + (dirm_data.len() % 2);
         if (actual_dirm_chunk_size as i32 - dirm_chunk_size as i32).abs() > 16 {
-            println!("DEBUG: DIRM size estimate was off by {} bytes, recalculating...", 
-                     actual_dirm_chunk_size as i32 - dirm_chunk_size as i32);
-            
+            println!(
+                "DEBUG: DIRM size estimate was off by {} bytes, recalculating...",
+                actual_dirm_chunk_size as i32 - dirm_chunk_size as i32
+            );
+
             // Recalculate with correct DIRM size
             let corrected_dirm_chunk_size = actual_dirm_chunk_size;
             current_offset = corrected_dirm_chunk_size as u32;
             file_offsets.clear();
-            
+
             // Create a new DIRM with corrected offsets
             let corrected_dirm = DjVmDir::new();
             for (i, page_chunk) in page_chunks.iter().enumerate() {
                 if current_offset % 2 != 0 {
                     current_offset += 1;
                 }
-                
+
                 file_offsets.push(current_offset);
                 current_offset += page_chunk.len() as u32;
-                
+
                 let page_id = format!("p{:04}", i + 1);
                 let file = File::new_with_offset(
                     &page_id,
@@ -189,18 +206,22 @@ impl DocumentEncoder {
                 );
                 corrected_dirm.insert_file(file, -1)?;
             }
-            
+
             // Re-encode with corrected offsets
             let mut corrected_dirm_stream = crate::iff::byte_stream::MemoryStream::new();
             corrected_dirm.encode_explicit(&mut corrected_dirm_stream, true, true)?;
             let corrected_dirm_data = corrected_dirm_stream.into_vec();
-            
-            println!("DEBUG: Corrected DIRM data size: {} bytes", corrected_dirm_data.len());
-            
+
+            println!(
+                "DEBUG: Corrected DIRM data size: {} bytes",
+                corrected_dirm_data.len()
+            );
+
             // Calculate total document size
-            let total_dirm_chunk_size = 8 + corrected_dirm_data.len() + (corrected_dirm_data.len() % 2);
+            let total_dirm_chunk_size =
+                8 + corrected_dirm_data.len() + (corrected_dirm_data.len() % 2);
             let pages_total_size: usize = page_chunks.iter().map(|p| p.len()).sum();
-            
+
             // Calculate exact padding needed for alignment
             let mut padding_bytes = 0;
             let mut pos = total_dirm_chunk_size;
@@ -211,9 +232,9 @@ impl DocumentEncoder {
                 }
                 pos += page_chunk.len();
             }
-            
+
             let total_djvm_payload = total_dirm_chunk_size + pages_total_size + padding_bytes;
-            
+
             // Write the DJVM file
             writer.write_all(b"AT&TFORM")?;
             writer.write_u32::<BigEndian>((4 + total_djvm_payload) as u32)?; // 4 for "DJVM"
@@ -235,10 +256,14 @@ impl DocumentEncoder {
                     writer.write_u8(0)?;
                     written_pos += 1;
                 }
-                
-                println!("DEBUG: Writing page {} at offset {} (expected {})", 
-                         i + 1, written_pos, file_offsets[i]);
-                
+
+                println!(
+                    "DEBUG: Writing page {} at offset {} (expected {})",
+                    i + 1,
+                    written_pos,
+                    file_offsets[i]
+                );
+
                 writer.write_all(page_data)?;
                 written_pos += page_data.len();
             }
@@ -246,7 +271,7 @@ impl DocumentEncoder {
             // Original estimate was good enough, proceed
             let total_dirm_chunk_size = actual_dirm_chunk_size;
             let pages_total_size: usize = page_chunks.iter().map(|p| p.len()).sum();
-            
+
             // Calculate exact padding needed for alignment
             let mut padding_bytes = 0;
             let mut pos = total_dirm_chunk_size;
@@ -257,7 +282,7 @@ impl DocumentEncoder {
                 }
                 pos += page_chunk.len();
             }
-            
+
             let total_djvm_payload = total_dirm_chunk_size + pages_total_size + padding_bytes;
 
             // Write the DJVM file
@@ -280,10 +305,14 @@ impl DocumentEncoder {
                     writer.write_u8(0)?;
                     written_pos += 1;
                 }
-                
-                println!("DEBUG: Writing page {} at offset {} (expected {})", 
-                         i + 1, written_pos, file_offsets[i]);
-                
+
+                println!(
+                    "DEBUG: Writing page {} at offset {} (expected {})",
+                    i + 1,
+                    written_pos,
+                    file_offsets[i]
+                );
+
                 writer.write_all(page_data)?;
                 written_pos += page_data.len();
             }
@@ -331,7 +360,7 @@ mod tests {
         assert!(data.len() > 20); // Sanity check
         assert_eq!(&data[0..8], b"AT&TFORM");
         assert_eq!(&data[12..16], b"DJVM"); // Should be a DJVM file
-                                           // A simple search for the DIRM and the nested FORM chunks
+                                            // A simple search for the DIRM and the nested FORM chunks
         assert!(data.windows(4).any(|w| w == b"DIRM"));
         assert!(data.windows(4).any(|w| w == b"FORM")); // The nested page form
         assert!(data.windows(4).any(|w| w == b"DJVU"));

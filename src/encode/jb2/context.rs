@@ -25,16 +25,16 @@ fn get_direct_context_image(image: &BitImage, x: i32, y: i32) -> usize {
         }
     };
 
-    (get_pixel(x - 1, y - 2) << 9) |
-    (get_pixel(x,     y - 2) << 8) |
-    (get_pixel(x + 1, y - 2) << 7) |
-    (get_pixel(x - 2, y - 1) << 6) |
-    (get_pixel(x - 1, y - 1) << 5) |
-    (get_pixel(x,     y - 1) << 4) |
-    (get_pixel(x + 1, y - 1) << 3) |
-    (get_pixel(x + 2, y - 1) << 2) |
-    (get_pixel(x - 2, y)     << 1) |
-    (get_pixel(x - 1, y)     << 0)
+    (get_pixel(x - 1, y - 2) << 9)
+        | (get_pixel(x, y - 2) << 8)
+        | (get_pixel(x + 1, y - 2) << 7)
+        | (get_pixel(x - 2, y - 1) << 6)
+        | (get_pixel(x - 1, y - 1) << 5)
+        | (get_pixel(x, y - 1) << 4)
+        | (get_pixel(x + 1, y - 1) << 3)
+        | (get_pixel(x + 2, y - 1) << 2)
+        | (get_pixel(x - 2, y) << 1)
+        | (get_pixel(x - 1, y) << 0)
 }
 
 //-----------------------------------------------------------------------------
@@ -94,7 +94,6 @@ fn get_refinement_context(
     (get_current_pixel(x - 2, y - 1)   << 12)
 }
 
-
 /// Encodes a `BitImage` using refinement/cross-coding against a reference bitmap.
 ///
 /// This is used to encode a symbol instance that is a refinement of a symbol
@@ -109,26 +108,33 @@ pub fn encode_bitmap_refine<W: Write, const N: usize>(
 ) -> Result<(), Jb2Error> {
     // We need a temporary image to store the pixels we've already coded
     let mut temp_image = BitImage::new(
-        image.width.try_into().map_err(|_| Jb2Error::InvalidData("Width too large".to_string()))?,
-        image.height.try_into().map_err(|_| Jb2Error::InvalidData("Height too large".to_string()))?
-    ).map_err(|e| Jb2Error::InvalidData(e.to_string()))?;
+        image
+            .width
+            .try_into()
+            .map_err(|_| Jb2Error::InvalidData("Width too large".to_string()))?,
+        image
+            .height
+            .try_into()
+            .map_err(|_| Jb2Error::InvalidData("Height too large".to_string()))?,
+    )
+    .map_err(|e| Jb2Error::InvalidData(e.to_string()))?;
 
     for y in 0..image.height as i32 {
         for x in 0..image.width as i32 {
             // Get the context for this pixel using both the reference and already-coded pixels
             let context = get_refinement_context_with_base(
-                &temp_image, 
-                reference, 
-                x, 
-                y, 
-                cx_offset, 
-                cy_offset
+                &temp_image,
+                reference,
+                x,
+                y,
+                cx_offset,
+                cy_offset,
             );
-            
+
             // Get the pixel value and encode it
             let pixel = image.get_pixel_unchecked(x as usize, y as usize);
             ac.encode_bit(context + base_context_index, pixel)?;
-            
+
             // Update the temporary image with the pixel we just coded
             if pixel {
                 temp_image.set_usize(x as usize, y as usize, true);
@@ -151,9 +157,9 @@ pub fn encode_bitmap_direct<W: Write, const N: usize>(
     for y in 0..image.height as i32 {
         for x in 0..image.width as i32 {
             // Get the context for this pixel
-                        let context = get_direct_context_image(image, x, y);
+            let context = get_direct_context_image(image, x, y);
             let final_context = base_context_index + context;
-            
+
             // Get the pixel value and encode it
             let pixel = image.get_pixel_unchecked(x as usize, y as usize);
             ac.encode_bit(final_context, pixel)?
@@ -190,15 +196,15 @@ fn get_refinement_context_with_base(
         }
     };
 
-    (get_current_pixel(x - 1, y - 1) << 10) |
-    (get_current_pixel(x,     y - 1) << 9)  |
-    (get_current_pixel(x + 1, y - 1) << 8)  |
-    (get_current_pixel(x - 1, y)     << 7)  |
-    (get_ref_pixel(x,     y - 1) << 6)  |
-    (get_ref_pixel(x - 1, y)     << 5)  |
-    (get_ref_pixel(x,     y)     << 4)  |
-    (get_ref_pixel(x + 1, y)     << 3)  |
-    (get_ref_pixel(x - 1, y + 1) << 2)  |
-    (get_ref_pixel(x,     y + 1) << 1)  |
-    (get_ref_pixel(x + 1, y + 1) << 0)
+    (get_current_pixel(x - 1, y - 1) << 10)
+        | (get_current_pixel(x, y - 1) << 9)
+        | (get_current_pixel(x + 1, y - 1) << 8)
+        | (get_current_pixel(x - 1, y) << 7)
+        | (get_ref_pixel(x, y - 1) << 6)
+        | (get_ref_pixel(x - 1, y) << 5)
+        | (get_ref_pixel(x, y) << 4)
+        | (get_ref_pixel(x + 1, y) << 3)
+        | (get_ref_pixel(x - 1, y + 1) << 2)
+        | (get_ref_pixel(x, y + 1) << 1)
+        | (get_ref_pixel(x + 1, y + 1) << 0)
 }

@@ -70,7 +70,12 @@ pub const MQ_BASE: [State; 47] = [
 pub const MQ_STATE_TABLE: &[State] = &MQ_BASE;
 
 pub const ZP_STATE_TABLE: [State; 256] = {
-    let mut table = [State { qe: 0, nmps: 0, nlps: 0, switch: false }; 256];
+    let mut table = [State {
+        qe: 0,
+        nmps: 0,
+        nlps: 0,
+        switch: false,
+    }; 256];
     let mut i = 0;
     while i < 256 {
         table[i] = State {

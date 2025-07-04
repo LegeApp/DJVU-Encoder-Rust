@@ -35,7 +35,7 @@ impl RecordStreamEncoder {
     /// Creates a new record stream encoder.
     /// It requires a base context index to ensure its contexts don't overlap
     /// with other components.
-        pub fn new(base_context_index: u32, max_contexts: u32, refinement_base_context: u32) -> Self {
+    pub fn new(base_context_index: u32, max_contexts: u32, refinement_base_context: u32) -> Self {
         // Partition the available contexts between the relative location predictor
         // and the general-purpose number coder.
         let rlp_contexts = relative::NUM_CONTEXTS;
@@ -84,12 +84,17 @@ impl RecordStreamEncoder {
 
         // 3. Encode the location (and get the relative offset for refinement).
         // Get the predicted location
-        let (pred_dx, pred_dy) = self.rlp.predict(component.bounds.x as i32, component.bounds.y as i32, sym_id, dictionary);
-        
+        let (pred_dx, pred_dy) = self.rlp.predict(
+            component.bounds.x as i32,
+            component.bounds.y as i32,
+            sym_id,
+            dictionary,
+        );
+
         // Encode the difference between actual and predicted location
         let dx = component.bounds.x as i32 - pred_dx;
         let dy = component.bounds.y as i32 - pred_dy;
-        
+
         // Encode the relative location
         let mut ctx_handle = self.ctx_handle_rel_loc;
         self.nc.code_int(ac, dx, &mut ctx_handle)?;
@@ -123,6 +128,7 @@ impl RecordStreamEncoder {
             RecordType::SymbolInstance => false,
             RecordType::SymbolRefinement => true,
         };
-        self.nc.code_int(ac, if bit { 1 } else { 0 }, &mut self.ctx_handle_rec_type)
+        self.nc
+            .code_int(ac, if bit { 1 } else { 0 }, &mut self.ctx_handle_rec_type)
     }
 }

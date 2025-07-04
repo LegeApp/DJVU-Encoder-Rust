@@ -1,7 +1,7 @@
 // src/iw44/transform.rs
 
-use bytemuck;
 use ::image::{GrayImage, RgbImage};
+use bytemuck;
 
 // Helper function to convert signed to unsigned with offset
 #[inline]
@@ -49,13 +49,13 @@ pub fn rgb_to_y(img: &RgbImage) -> GrayImage {
     let (w, h) = img.dimensions();
     let mut buffer = vec![0i8; (w * h) as usize];
     rgb_to_y_buffer(img, &mut buffer);
-    
+
     // Debug: check first few Y values
     if buffer.len() >= 10 {
         let y_samples: Vec<i8> = buffer.iter().take(10).cloned().collect();
         println!("DEBUG: First 10 Y values: {:?}", y_samples);
     }
-    
+
     convert_signed_buffer_to_grayscale(&buffer, w, h)
 }
 
@@ -333,7 +333,8 @@ fn filter_fh(p: &mut [i16], w: usize, h: usize, rowsize: usize, scale: usize) {
                 if let Some(index) = q_idx.checked_sub(s3) {
                     if index < p_row.len() {
                         let b_sum = b1 as i32 + b2 as i32;
-                        let update = (((b_sum << 3) + b_sum - b0 as i32 - b3 as i32 + 16) >> 5) as i16;
+                        let update =
+                            (((b_sum << 3) + b_sum - b0 as i32 - b3 as i32 + 16) >> 5) as i16;
                         p_row[index] += update;
                     }
                 }
@@ -395,10 +396,30 @@ fn filter_iv(p: &mut [i16], w: usize, h: usize, rowsize: usize, scale: usize) {
                 // Special cases near boundaries
                 for x_idx in (0..w).step_by(scale) {
                     let q_idx = p_update_offset + x_idx;
-                    let a = (if y_idx >= 4 { p.get(q_idx - s).copied() } else { None }).unwrap_or(0) as i32
-                        + (if y_idx - 2 < effective_h { p.get(q_idx + s).copied() } else { None }).unwrap_or(0) as i32;
-                    let b = (if y_idx >= 6 { p.get(q_idx - s3).copied() } else { None }).unwrap_or(0) as i32
-                        + (if y_idx < effective_h { p.get(q_idx + s3).copied() } else { None }).unwrap_or(0) as i32;
+                    let a = (if y_idx >= 4 {
+                        p.get(q_idx - s).copied()
+                    } else {
+                        None
+                    })
+                    .unwrap_or(0) as i32
+                        + (if y_idx - 2 < effective_h {
+                            p.get(q_idx + s).copied()
+                        } else {
+                            None
+                        })
+                        .unwrap_or(0) as i32;
+                    let b = (if y_idx >= 6 {
+                        p.get(q_idx - s3).copied()
+                    } else {
+                        None
+                    })
+                    .unwrap_or(0) as i32
+                        + (if y_idx < effective_h {
+                            p.get(q_idx + s3).copied()
+                        } else {
+                            None
+                        })
+                        .unwrap_or(0) as i32;
                     let update = (((a << 3) + a - b + 16) >> 5) as i16;
                     p[q_idx] -= update; // Subtract instead of add
                 }
@@ -420,7 +441,11 @@ fn filter_iv(p: &mut [i16], w: usize, h: usize, rowsize: usize, scale: usize) {
             for x_idx in (0..w).step_by(scale) {
                 let q_idx = p_offset + x_idx;
                 let prev_s = p[q_idx - s];
-                let next_s = if y_idx + 1 < effective_h { p[q_idx + s] } else { prev_s };
+                let next_s = if y_idx + 1 < effective_h {
+                    p[q_idx + s]
+                } else {
+                    prev_s
+                };
                 let a = prev_s as i32 + next_s as i32;
                 let delta = ((a + 1) >> 1) as i16;
                 p[q_idx] += delta; // Add instead of subtract
@@ -474,7 +499,8 @@ fn filter_ih(p: &mut [i16], w: usize, h: usize, rowsize: usize, scale: usize) {
                 if let Some(index) = q_idx.checked_sub(s3) {
                     if index < p_row.len() {
                         let b_sum = b1 as i32 + b2 as i32;
-                        let update = (((b_sum << 3) + b_sum - b0 as i32 - b3 as i32 + 16) >> 5) as i16;
+                        let update =
+                            (((b_sum << 3) + b_sum - b0 as i32 - b3 as i32 + 16) >> 5) as i16;
                         p_row[index] -= update; // Subtract instead of add
                     }
                 }

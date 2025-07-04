@@ -5,8 +5,8 @@
 //! previously encoded symbol.
 
 use crate::arithmetic_coder::ArithmeticEncoder;
-use crate::encode::jb2::num_coder::{NumCoder, BIG_NEGATIVE, BIG_POSITIVE};
 use crate::encode::jb2::error::Jb2Error;
+use crate::encode::jb2::num_coder::{NumCoder, BIG_NEGATIVE, BIG_POSITIVE};
 use crate::encode::jb2::symbol_dict::BitImage;
 use std::io::Write;
 
@@ -50,7 +50,7 @@ impl RelLocPredictor {
         self.ctx_handle_dy = 0;
         self.ctx_handle_dx = 0;
     }
-    
+
     /// Predicts the location of a symbol based on its context
     pub fn predict(&self, x: i32, y: i32, _sym_id: usize, _dictionary: &[BitImage]) -> (i32, i32) {
         // Simple prediction: use the last seen position

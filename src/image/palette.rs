@@ -10,9 +10,9 @@
 
 use crate::image::image_formats::{Pixel, Pixmap};
 use crate::utils::error::{DjvuError, Result};
+use ::image::Rgb;
 use bytemuck::{cast_slice, Pod, Zeroable};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use ::image::Rgb;
 use std::io::{Cursor, Read, Write};
 
 // --- Helper trait for u24 operations ---

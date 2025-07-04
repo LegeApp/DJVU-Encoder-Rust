@@ -3,15 +3,15 @@
 //! This module implements the BZZ compression algorithm as required by the DjVu specification.
 //! It is a port of the C++ BSByteStream implementation from DjVuLibre.
 
-use crate::encode::zp::{ZpEncoder, BitContext};
+use crate::encode::zp::{BitContext, ZpEncoder};
 use crate::utils::error::{DjvuError, Result};
 use std::io::Write;
 
 const MIN_BLOCK_SIZE: usize = 10 * 1024;
 const MAX_BLOCK_SIZE: usize = 4096 * 1024;
 const OVERFLOW: usize = 32; // Extra bytes for encoding safety
-const FREQMAX: usize = 4;   // Max frequencies for MTF
-const CTXIDS: usize = 3;    // Context IDs for ZP encoding
+const FREQMAX: usize = 4; // Max frequencies for MTF
+const CTXIDS: usize = 3; // Context IDs for ZP encoding
 const FREQS0: u32 = 100000; // Thresholds for estimation speed
 const FREQS1: u32 = 1000000;
 
@@ -74,17 +74,24 @@ impl<W: Write> BsEncoder<W> {
             }
             last_col[i] = data[(start + len - 1) % len];
         }
-        
-        println!("DEBUG BWT: Input length={}, primary_index={}, first 10 bytes of output: {:?}", 
-                 len, primary_index, &last_col[..10.min(len)]);
+
+        println!(
+            "DEBUG BWT: Input length={}, primary_index={}, first 10 bytes of output: {:?}",
+            len,
+            primary_index,
+            &last_col[..10.min(len)]
+        );
 
         (last_col, primary_index)
     }
 
     /// Encodes the transformed block with MTF and ZP encoding.
     fn encode_transformed(&mut self, data: &mut [u8], size: u32, markerpos: usize) -> Result<()> {
-        println!("DEBUG BZZ: Encoding block size={}, markerpos={}", size, markerpos);
-        
+        println!(
+            "DEBUG BZZ: Encoding block size={}, markerpos={}",
+            size, markerpos
+        );
+
         // Header: encode block size
         self.encode_raw(24, size)?;
 
@@ -117,7 +124,7 @@ impl<W: Write> BsEncoder<W> {
         let fadd = 4u32;
 
         // Encode data with MTF and ZP
-        let mut mtfno = 3;  // This should be mutable and track current MTF state
+        let mut mtfno = 3; // This should be mutable and track current MTF state
         let mut contexts: Vec<BitContext> = vec![0; 300]; // Context array as in C++ code
         for (i, &c) in data.iter().enumerate() {
             let mut ctxid = (CTXIDS - 1) as u8;
@@ -127,18 +134,22 @@ impl<W: Write> BsEncoder<W> {
 
             // Get MTF position for this character (or marker)
             let mtfno_current = if i == markerpos {
-                256  // Special marker position
+                256 // Special marker position
             } else {
                 rmtf[c as usize] as usize
             };
-            
+
             // Update mtfno for next iteration (C++ does this)
             mtfno = mtfno_current;
 
             let mut cx_idx = 0;
             let bit = mtfno_current == 0;
-            println!("DEBUG BZZ: Encoding bit={} for mtfno={} at position {}", bit, mtfno_current, i);
-            self.zp_encoder.encode(bit, &mut contexts[cx_idx + ctxid as usize])?;
+            println!(
+                "DEBUG BZZ: Encoding bit={} for mtfno={} at position {}",
+                bit, mtfno_current, i
+            );
+            self.zp_encoder
+                .encode(bit, &mut contexts[cx_idx + ctxid as usize])?;
             if bit {
                 self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
                 continue;
@@ -146,7 +157,8 @@ impl<W: Write> BsEncoder<W> {
 
             cx_idx += CTXIDS;
             let bit = mtfno_current == 1;
-            self.zp_encoder.encode(bit, &mut contexts[cx_idx + ctxid as usize])?;
+            self.zp_encoder
+                .encode(bit, &mut contexts[cx_idx + ctxid as usize])?;
             if bit {
                 self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
                 continue;
@@ -240,14 +252,14 @@ impl<W: Write> BsEncoder<W> {
         let mut n = 1u32;
         let m = 1u32 << bits;
         let mut x = x as u32;
-        
+
         // C++ does: ctx = ctx - 1, then uses ctx[n]
         // This means we need to offset by -1 from the slice start
         // But since we can't have negative indices, we adjust our indexing
         while n < m {
             x = (x & (m - 1)) << 1;
             let b = (x >> bits) != 0;
-            
+
             // Use n-1 as the index since C++ pre-decrements ctx pointer
             let ctx_idx = (n - 1) as usize;
             if ctx_idx < ctx.len() {
@@ -260,9 +272,17 @@ impl<W: Write> BsEncoder<W> {
 
     /// Rotates the MTF table and updates frequencies.
     /// c: the actual character value (not MTF position)
-    fn rotate_mtf(&mut self, mtf: &mut Vec<u8>, rmtf: &mut [u8], freq: &mut [u32; FREQMAX], c: u8, mut fadd: u32, fshift: u8) {
-        let mtfno = rmtf[c as usize] as usize;  // Get current MTF position of character
-        
+    fn rotate_mtf(
+        &mut self,
+        mtf: &mut Vec<u8>,
+        rmtf: &mut [u8],
+        freq: &mut [u32; FREQMAX],
+        c: u8,
+        mut fadd: u32,
+        fshift: u8,
+    ) {
+        let mtfno = rmtf[c as usize] as usize; // Get current MTF position of character
+
         // Adjust frequencies for overflow (matches C++ exactly)
         fadd = fadd + (fadd >> fshift);
         if fadd > 0x10000000 {
@@ -302,19 +322,22 @@ impl<W: Write> Write for BsEncoder<W> {
         while bytes_written < buf.len() {
             let remaining_in_block = self.block_size - self.buffer.len();
             let to_write = (buf.len() - bytes_written).min(remaining_in_block);
-            
-            self.buffer.extend_from_slice(&buf[bytes_written..bytes_written + to_write]);
+
+            self.buffer
+                .extend_from_slice(&buf[bytes_written..bytes_written + to_write]);
             bytes_written += to_write;
 
             if self.buffer.len() == self.block_size {
-                self.encode_block().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                self.encode_block()
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
             }
         }
         Ok(bytes_written)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.encode_block().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        self.encode_block()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         // Note: ZpEncoder doesn't have a public flush method, finish() will be called in Drop
         Ok(())
     }

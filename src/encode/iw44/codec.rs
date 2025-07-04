@@ -26,8 +26,8 @@ pub struct Codec {
     pub slice_count: usize, // Track total slices for safety
 
     // Quantization tables, mutable as they are shifted down each bitplane
-    quant_hi: [i32; 10],
-    quant_lo: [i32; 16],
+    pub quant_hi: [i32; 10],
+    pub quant_lo: [i32; 16],
 
     // Coding contexts
     ctx_start: [BitContext; 32],
@@ -41,17 +41,32 @@ impl Codec {
         let mut quant_lo = [0; 16];
         let mut quant_hi = [0; 10];
 
-        // Initialize quantization tables from constants, but scale them down by the
-        // same left-shift (2^IW_SHIFT) applied to coefficients so that the first
-        // bit-plane corresponds to bit 0 of the scaled value. Without this scaling
-        // the thresholds are 64× too large which makes most slices appear null.
         for (dst, src) in quant_lo.iter_mut().zip(IW_QUANT.iter()) {
-            *dst = *src >> IW_SHIFT; // divide by 64
+        *dst = *src >> IW_SHIFT; // Scale only by IW_SHIFT
         }
-        // Band-wise high thresholds (bands 1..9)
         for (dst, src) in quant_hi[1..].iter_mut().zip(IW_QUANT[1..10].iter()) {
-            *dst = *src >> IW_SHIFT; // divide by 64
+        *dst = *src >> IW_SHIFT; // Scale only by IW_SHIFT
         }
+
+        // Find maximum coefficient value to determine starting bit-plane
+        let mut max_coeff = 0i32;
+        for block in &map.blocks {
+            for bucket_idx in 0..64 {
+                if let Some(bucket) = block.get_bucket(bucket_idx) {
+                    for &coeff in bucket {
+                        max_coeff = max_coeff.max((coeff as i32).abs());
+                    }
+                }
+            }
+        }
+
+        // Start from the highest bit-plane that contains information
+        // For 8-bit images with IW_SHIFT=6, coefficients can be ~2^13, so start from bit 13
+        let cur_bit = if max_coeff > 0 {
+            (max_coeff as f32).log2().floor() as i32
+        } else {
+            1 // Fallback for empty images
+        };
 
         let emap = CoeffMap::new(map.iw, map.ih);
 
@@ -59,7 +74,7 @@ impl Codec {
             map,
             emap,
             cur_band: 0,
-            cur_bit: 1, // C++ starts at 1
+            cur_bit, // Start from the highest significant bit
             slice_count: 0,
             quant_hi,
             quant_lo,
@@ -96,13 +111,13 @@ impl Codec {
             // For band 0, if all quantization thresholds are too high, slice is null
             let all_too_high = self.quant_lo.iter().all(|&threshold| threshold >= 0x8000);
             let all_too_low = self.quant_lo.iter().all(|&threshold| threshold <= 0);
-            
+
             all_too_high || all_too_low
         } else {
             // For other bands, check the band's quantization threshold
             let threshold = self.quant_hi[self.cur_band];
             let result = threshold <= 0 || threshold >= 0x8000;
-            
+
             result
         }
     }
@@ -124,33 +139,79 @@ impl Codec {
         }
 
         let mut coeff_state = [CoeffState::empty(); 256];
-        
+
+        // Debug: Print quantization info
+        if self.slice_count <= 5 {
+            println!(
+                "DEBUG IW44: Slice {}, band={}, bit={}",
+                self.slice_count, self.cur_band, self.cur_bit
+            );
+            if self.cur_band == 0 {
+                println!("DEBUG IW44: Band 0 quant_lo: {:?}", &self.quant_lo[..4]);
+            } else {
+                println!(
+                    "DEBUG IW44: Band {} quant_hi: {}",
+                    self.cur_band, self.quant_hi[self.cur_band]
+                );
+            }
+        }
+
         // First, do the detailed null check WITHOUT computing neighbor activity
         if self.is_null_slice(self.cur_band, self.cur_bit, &mut coeff_state) {
+            if self.slice_count <= 5 {
+                println!("DEBUG IW44: Slice {} is NULL, finishing", self.slice_count);
+            }
             let more = self.finish_slice();
             return Ok(more);
         }
 
-        // Only if slice is NOT null, compute expensive neighbor activity
-        let blocks_w = self.map.bw / 32;
-        let mut neighbor_active = vec![vec![false; 64]; self.map.num_blocks]; // 64 buckets per block
+        if self.slice_count <= 5 {
+            println!(
+                "DEBUG IW44: Slice {} is NOT NULL, encoding data",
+                self.slice_count
+            );
+        }
+
+        // Calculate block layout dimensions
+        let blocks_w = self.map.bw / 32; // 32 pixels per block
+        let blocks_h = self.map.bh / 32;
         
+        // Create neighbor activity array: [block][bucket] -> bool
+        let mut neighbor_active = vec![vec![false; 64]; self.map.num_blocks];
+
+        // Only if slice is NOT null, compute expensive neighbor activity
         for blk in 0..self.map.num_blocks {
             let bx = blk % blocks_w;
             let by = blk / blocks_w;
-            for bucket in 0..64 { // 64 buckets per 32×32 block
-                neighbor_active[blk][bucket] = 
-                    // Check left neighbor
-                    (bx > 0 && 
-                     self.emap.blocks[blk - 1].get_bucket(bucket as u8)
-                        .map_or(false, |b| b.iter().any(|&c| c != 0))) ||
-                    // Check top neighbor  
-                    (by > 0 && 
-                     self.emap.blocks[blk - blocks_w].get_bucket(bucket as u8)
-                        .map_or(false, |b| b.iter().any(|&c| c != 0)));
+            for bucket in 0..64 {
+                let mut active = false;
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        if bx as isize + dx < 0 || by as isize + dy < 0 {
+                            continue;
+                        }
+                        let nb = (by as isize + dy) * blocks_w as isize + (bx as isize + dx);
+                        if nb < 0 || nb as usize >= self.map.num_blocks {
+                            continue;
+                        }
+                        active |= self.emap.blocks[nb as usize]
+                            .get_bucket(bucket as u8)
+                            .map_or(false, |b| b.iter().any(|&c| c != 0));
+                        if active {
+                            break;
+                        }
+                    }
+                    if active {
+                        break;
+                    }
+                }
+                neighbor_active[blk][bucket] = active;
             }
         }
-        
+
         // Process the non-null slice
         for block_idx in 0..self.map.num_blocks {
             let fbucket = BAND_BUCKETS[self.cur_band].start;
@@ -165,46 +226,49 @@ impl Codec {
             )?;
         }
 
-        let more = self.finish_slice();
-        
-        Ok(more)
+        // Return whether more slices are available (don't advance state here)
+        // State advancement is now handled by the encoder
+        Ok(self.cur_bit >= 0)
     }
 
     fn finish_slice(&mut self) -> bool {
-        // Reduce quantization threshold for next round
-        self.quant_hi[self.cur_band] >>= 1;
+        // Reduce quantization threshold for next round (divide by √2 ≈ 1.414)
+        // This follows the IW44 spec: threshold decay should be more gradual than divide-by-2
+        self.quant_hi[self.cur_band] = (self.quant_hi[self.cur_band] as f32 / 1.414) as i32;
         if self.cur_band == 0 {
             for q in self.quant_lo.iter_mut() {
-                *q >>= 1;
+                *q = (*q as f32 / 1.414) as i32;
             }
         }
 
         self.cur_band += 1;
         if self.cur_band >= BAND_BUCKETS.len() {
             self.cur_band = 0;
-            self.cur_bit += 1;
-            
-            // Hard safety check - prevent infinite loops
-            if self.cur_bit >= 16 {
-                self.cur_bit = -1;
+            self.cur_bit -= 1; // Decrement bit-plane after completing all bands
+
+            // Debug: Print bit-plane transitions
+            if self.slice_count <= 20 || self.cur_bit <= 2 {
+                println!(
+                    "DEBUG IW44: Completed all bands for bit-plane {}, moving to bit-plane {}",
+                    self.cur_bit + 1,
+                    self.cur_bit
+                );
+            }
+
+            // Stop when we reach bit-plane -1 (have processed bit-plane 0)
+            if self.cur_bit < 0 {
                 return false;
             }
-            
-            // Check if we are done - Modified termination condition
-            // If all quantization thresholds are very small (< 8), consider done
-            let max_quant = self.quant_hi.iter().max().copied().unwrap_or(0);
-            if max_quant < 8 {
-                self.cur_bit = -1;
-                return false;
-            }
-            
-            // Also check the original C++ condition - last band must be 0
-            if self.quant_hi[BAND_BUCKETS.len() - 1] == 0 {
+
+            // Also check if all quantization thresholds are 0 (alternative stop condition)
+            let all_zero =
+                self.quant_hi.iter().all(|&q| q == 0) && self.quant_lo.iter().all(|&q| q == 0);
+            if all_zero {
                 self.cur_bit = -1;
                 return false;
             }
         }
-        
+
         true
     }
 
@@ -234,6 +298,7 @@ impl Codec {
                     bstatetmp = CoeffState::UNK;
                 } else if epcoeff.is_none() {
                     let pcoeff = pcoeff.unwrap();
+
                     for i in 0..16 {
                         let mut cst = CoeffState::UNK;
                         if (pcoeff[i] as i32).abs() >= thres {
@@ -245,6 +310,7 @@ impl Codec {
                 } else {
                     let pcoeff = pcoeff.unwrap();
                     let epcoeff = epcoeff.unwrap();
+
                     for i in 0..16 {
                         let mut cst = CoeffState::UNK;
                         if epcoeff[i] != 0 {
@@ -264,6 +330,19 @@ impl Codec {
             let pcoeff = block.get_bucket(0).unwrap_or(&[0; 16]);
             let epcoeff = eblock.get_bucket(0).unwrap_or(&[0; 16]);
             let cstate_slice = &mut coeff_state[0..16];
+
+            // Debug: Show band 0 coefficients (DC and low frequency)
+            let significant_coeffs: Vec<(usize, i16, i32)> = (0..16)
+                .filter_map(|i| {
+                    let thres = quant_lo[i];
+                    let coeff = pcoeff[i];
+                    if (coeff as i32).abs() >= thres {
+                        Some((i, coeff, thres))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
             for i in 0..16 {
                 let thres = quant_lo[i];
@@ -339,7 +418,6 @@ impl Codec {
 
         // Code new active coefficients (and their sign)
         if bbstate.contains(CoeffState::NEW) {
-            let mut thres = self.quant_hi[band];
             for buckno in 0..nbucket {
                 if bucket_states[buckno].contains(CoeffState::NEW) {
                     let cstate_slice = &coeff_state[buckno * 16..(buckno + 1) * 16];
@@ -352,28 +430,37 @@ impl Codec {
                     let epcoeff = eblock.get_bucket_mut((fbucket + buckno) as u8);
                     for i in 0..16 {
                         if cstate_slice[i].contains(CoeffState::UNK) {
-                            // Calculate context based on coefficient activity
-                            let ctx_idx = {
-                                let parent_active = bucket_states[buckno].contains(CoeffState::ACTIVE);
-                                let coeff_pos_ctx = if band > 0 {
-                                    // Higher bands: context from parent activity and position
-                                    (i / 4) * 2
-                                } else {
-                                    // Band zero: more complex positional context
-                                    (i & 3) + if i < 4 { 0 } else { 4 }
-                                };
-                                (parent_active as usize) * 8 + coeff_pos_ctx
+                            let is_new = cstate_slice[i].contains(CoeffState::NEW);
+
+                            // Use a dedicated context for coefficient activation
+                            let ctx_idx = if band == 0 {
+                                i.min(15) // Band 0: use coefficient index as context
+                            } else {
+                                band.min(15) // Other bands: use band number as context
                             };
 
-                            let is_new = cstate_slice[i].contains(CoeffState::NEW);
-                            zp.encode(is_new, &mut self.ctx_start[ctx_idx.min(31)])?;
+                            zp.encode(is_new, &mut self.ctx_start[ctx_idx])?;
 
                             if is_new {
-                                zp.encode(pcoeff[i] < 0, &mut self.ctx_start[ctx_idx.min(31)])?;
-                                if band == 0 {
-                                    thres = self.quant_lo[i];
-                                }
-                                epcoeff[i] = (thres + (thres >> 1)) as i16;
+                                // Encode the residual sign bit (XOR of original and predicted)
+                                let residual_sign = (pcoeff[i] ^ epcoeff[i]) < 0;
+                                zp.encode(residual_sign, &mut self.ctx_mant)?;
+
+                                // Get the step size for this coefficient
+                                let step_size = if band == 0 {
+                                    self.quant_lo[i]
+                                } else {
+                                    self.quant_hi[band]
+                                };
+
+                                // C++ code: epcoeff[i] = thres + (thres >> 1);
+                                // This sets the encoded value to 1.5 * step_size
+                                let initial_val = step_size + (step_size >> 1);
+                                epcoeff[i] = if pcoeff[i] < 0 {
+                                    -(initial_val as i16)
+                                } else {
+                                    initial_val as i16
+                                };
                             }
                         }
                     }
@@ -381,9 +468,8 @@ impl Codec {
             }
         }
 
-        // Code mantissa bits
+        // Code mantissa bits (for already active coefficients)
         if bbstate.contains(CoeffState::ACTIVE) {
-            let mut thres = self.quant_hi[band];
             for buckno in 0..nbucket {
                 if bucket_states[buckno].contains(CoeffState::ACTIVE) {
                     let cstate_slice = &coeff_state[buckno * 16..(buckno + 1) * 16];
@@ -396,26 +482,37 @@ impl Codec {
                     let epcoeff = eblock.get_bucket_mut((fbucket + buckno) as u8);
                     for i in 0..16 {
                         if cstate_slice[i].contains(CoeffState::ACTIVE) {
-                            let coeff_abs = (pcoeff[i] as i32).abs();
-                            let ecoeff = epcoeff[i] as i32;
-                            if band == 0 {
-                                thres = self.quant_lo[i];
-                            }
-
-                            let mut val = coeff_abs - ecoeff;
-                            let mut quant = thres;
-                            while quant > 0 && val >= quant {
-                                zp.encode(true, &mut self.ctx_mant)?;
-                                val -= quant;
-                                quant >>= 1;
-                            }
-                            if val > 0 {
-                                zp.encode(true, &mut self.ctx_mant)?;
+                            let step_size = if band == 0 {
+                                self.quant_lo[i]
                             } else {
-                                zp.encode(false, &mut self.ctx_mant)?;
-                            }
+                                self.quant_hi[band]
+                            };
 
-                            epcoeff[i] = (ecoeff + val + (quant >> 1)) as i16;
+                            if step_size > 0 {
+                                let coeff_abs = (pcoeff[i] as i32).abs();
+                                let ecoeff_abs = (epcoeff[i] as i32).abs();
+
+                                // C++ logic: pix = (coeff >= ecoeff) ? 1 : 0
+                                let should_increase = coeff_abs >= ecoeff_abs;
+
+                                // Encode mantissa bit based on threshold
+                                if ecoeff_abs <= 3 * step_size {
+                                    zp.encode(should_increase, &mut self.ctx_mant)?;
+                                } else {
+                                    // Use IW encoder for higher values (raw bit)
+                                    zp.encode(should_increase, &mut self.ctx_mant)?;
+                                }
+
+                                // C++ adjustment: epcoeff[i] = ecoeff - (pix ? 0 : thres) + (thres >> 1)
+                                let adjustment = if should_increase { 0 } else { step_size };
+                                let new_abs = ecoeff_abs - adjustment + (step_size >> 1);
+
+                                epcoeff[i] = if pcoeff[i] < 0 {
+                                    -(new_abs as i16)
+                                } else {
+                                    new_abs as i16
+                                };
+                            }
                         }
                     }
                 }

@@ -1,6 +1,6 @@
-use crate::iff::byte_stream::{ByteStream, MemoryStream};
+use crate::encode::zp::zp_codec::{ZpCodecError, ZpEncoder as ZpCodecEncoder};
 use crate::iff::bs_byte_stream::bzz_compress;
-use crate::encode::zp::zp_codec::{ZpEncoder as ZpCodecEncoder, ZpCodecError};
+use crate::iff::byte_stream::{ByteStream, MemoryStream};
 use crate::utils::error::{DjvuError, Result};
 
 use std::collections::HashMap;
@@ -53,7 +53,14 @@ impl File {
     }
 
     /// Creates a new File instance with specified offset and size
-    pub fn new_with_offset(id: &str, name: &str, title: &str, file_type: FileType, offset: u32, size: u32) -> Arc<Self> {
+    pub fn new_with_offset(
+        id: &str,
+        name: &str,
+        title: &str,
+        file_type: FileType,
+        offset: u32,
+        size: u32,
+    ) -> Arc<Self> {
         Arc::new(File {
             id: id.to_string(),
             name: name.to_string(),
@@ -337,7 +344,7 @@ impl DjVmDir {
         do_rename: bool,
     ) -> Result<()> {
         let data = self.data.lock().unwrap();
-        
+
         // Write unencoded header
         stream.write_u8(Self::VERSION | if bundled { 0x80 } else { 0 })?;
         stream.write_u16(data.files_list.len() as u16)?;
@@ -382,15 +389,21 @@ impl DjVmDir {
             ByteStream::write_u8(&mut bzz_buffer, 0)?; // Null terminator
         }
 
-        println!("DEBUG: BZZ buffer before compression: {} bytes", bzz_buffer.as_slice().len());
+        println!(
+            "DEBUG: BZZ buffer before compression: {} bytes",
+            bzz_buffer.as_slice().len()
+        );
         println!("DEBUG: BZZ data: {:02X?}", bzz_buffer.as_slice());
 
         // Use proper BZZ compression for the DIRM data according to DjVu spec
         let compressed = bzz_compress(bzz_buffer.as_slice(), 50)?; // 50KB block size for small DIRM
-        
+
         println!("DEBUG: BZZ compressed size: {} bytes", compressed.len());
-        println!("DEBUG: First 20 bytes of compressed data: {:02X?}", &compressed[..compressed.len().min(20)]);
-        
+        println!(
+            "DEBUG: First 20 bytes of compressed data: {:02X?}",
+            &compressed[..compressed.len().min(20)]
+        );
+
         stream.write_all(&compressed)?;
 
         Ok(())
@@ -417,12 +430,12 @@ impl DjVmDir {
         }
         Some(data.page2file[page_num as usize].id.clone())
     }
-    
+
     pub fn page_to_file(&self, page_num: i32) -> Result<Arc<File>> {
         let page_id = self.page_to_id(page_num).ok_or_else(|| {
             DjvuError::InvalidOperation(format!("Page number {} not found", page_num))
         })?;
-        
+
         let data = self.data.lock().unwrap();
         data.id2file.get(&page_id).cloned().ok_or_else(|| {
             DjvuError::InvalidOperation(format!("File for page {} not found", page_num))
@@ -483,12 +496,12 @@ impl DjVmDir {
     }
 
     // Second implementation of move_file_to_page_pos removed to fix duplicate function error
-    
+
     /// Resolves duplicate file names in the directory
     pub fn resolve_duplicates(&self, _save_names_only: bool) -> Vec<Arc<File>> {
         let data = self.data.lock().unwrap();
         let mut result = Vec::new();
-        
+
         for file in &data.files_list {
             // Create a new File with the same properties
             let new_file = File {
@@ -504,47 +517,48 @@ impl DjVmDir {
                 valid_name: file.valid_name,
                 oldname: file.oldname.clone(),
             };
-            
+
             // Create a new Arc with the new File
             let new_arc = Arc::new(new_file);
-            
+
             // Now we can add the Arc to our result
             result.push(new_arc);
         }
-        
+
         // Note: This implementation doesn't actually check for duplicates
         // You'll need to implement that logic separately
         result
     }
-    
+
     /// Gets a file by its ID
     pub fn get_file_by_id(&self, id: &str) -> Option<Arc<File>> {
         let data = self.data.lock().unwrap();
         data.id2file.get(id).cloned()
     }
-    
+
     /// Inserts a file at a specific position
     pub fn insert_file(&self, file: Arc<File>, pos: i32) -> Result<()> {
         let mut data = self.data.lock().unwrap();
-        
+
         // Check if file already exists
         if data.id2file.contains_key(&file.id) {
-            return Err(DjvuError::InvalidOperation(
-                format!("File with ID '{}' already exists", file.id)
-            ));
+            return Err(DjvuError::InvalidOperation(format!(
+                "File with ID '{}' already exists",
+                file.id
+            )));
         }
-        
+
         // Insert file in files_list at position or at the end if pos is -1
         let insert_pos = if pos < 0 {
             data.files_list.len()
         } else {
             pos.min(data.files_list.len() as i32) as usize
         };
-        
+
         data.files_list.insert(insert_pos, Arc::clone(&file));
         data.id2file.insert(file.id.clone(), Arc::clone(&file));
         data.name2file.insert(file.name.clone(), Arc::clone(&file));
-        
+
         // If it's a page, add it to page2file
         if file.is_page() {
             let page_num = data.page2file.len() as i32;
@@ -553,32 +567,33 @@ impl DjVmDir {
             let mut file_copy = (*file).clone();
             file_copy.page_num = page_num;
             let file_arc = Arc::new(file_copy);
-            
+
             // Update all the references with the corrected page_num
             let insert_pos = data.files_list.len() - 1; // Last inserted position
             data.files_list[insert_pos] = Arc::clone(&file_arc);
             data.id2file.insert(file.id.clone(), Arc::clone(&file_arc));
-            data.name2file.insert(file.name.clone(), Arc::clone(&file_arc));
-            
+            data.name2file
+                .insert(file.name.clone(), Arc::clone(&file_arc));
+
             data.page2file.push(file_arc);
         }
-        
+
         Ok(())
     }
-    
+
     /// Clone the directory with new offsets for files
     pub fn clone_with_new_offsets(&self, file_offsets: &HashMap<String, u32>) -> Arc<Self> {
         // Create a new DjVmDir instance
         let new_dir = DjVmDir::new();
-        
+
         // Get the current data
         let data = self.data.lock().unwrap();
-        
+
         // Copy all files with updated offsets
         for file in &data.files_list {
             // Create a new File with the same properties but potentially updated offset
             let new_offset = file_offsets.get(&file.id).copied().unwrap_or(file.offset);
-            
+
             let new_file = File {
                 id: file.id.clone(),
                 name: file.name.clone(),
@@ -592,11 +607,11 @@ impl DjVmDir {
                 valid_name: file.valid_name,
                 oldname: file.oldname.clone(),
             };
-            
+
             // Add the new file to the new directory
             new_dir.add_file(Arc::new(new_file));
         }
-        
+
         new_dir
     }
 }

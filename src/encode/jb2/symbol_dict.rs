@@ -10,9 +10,9 @@ use bitvec::order::Msb0;
 use bitvec::prelude::*;
 use once_cell::unsync::OnceCell;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::error::Error;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 
 /// Errors that can occur when creating or manipulating a `BitImage`.
@@ -33,7 +33,6 @@ impl fmt::Display for BitImageError {
 }
 
 impl Error for BitImageError {}
-
 
 // ==============================================
 // Core Data Structures (from jbig2sym.rs)
@@ -148,9 +147,13 @@ impl BitImage {
 }
 
 impl lutz::Image for BitImage {
-    fn width(&self) -> u32 { self.width as u32 }
-    fn height(&self) -> u32 { self.height as u32 }
-    
+    fn width(&self) -> u32 {
+        self.width as u32
+    }
+    fn height(&self) -> u32 {
+        self.height as u32
+    }
+
     fn has_pixel(&self, x: u32, y: u32) -> bool {
         x < self.width as u32 && y < self.height as u32
     }
@@ -268,13 +271,17 @@ impl Comparator {
 
                 let y0 = dy.max(0) as u32;
                 let y1 = (a.height as i32 + dy).min(b.height as i32).max(0) as u32;
-                if y1 <= y0 { continue; }
+                if y1 <= y0 {
+                    continue;
+                }
 
                 for row in 0..(y1 - y0) {
                     let a_row_idx = (row as i32 + y0 as i32 - dy) as usize * awpr;
                     let b_row_idx = (row as i32 + y0 as i32) as usize * bwpr;
 
-                    if a_row_idx >= a_words.len() || b_row_idx >= b_words.len() { continue; }
+                    if a_row_idx >= a_words.len() || b_row_idx >= b_words.len() {
+                        continue;
+                    }
 
                     let a_row_end = std::cmp::min(a_row_idx + awpr, a_words.len());
                     let b_row_end = std::cmp::min(b_row_idx + bwpr, b_words.len());
@@ -285,14 +292,26 @@ impl Comparator {
                     for w in 0..((a.width.max(b.width) + 31) >> 5) {
                         let idx = w as isize + word_dx;
                         let aw = Self::get_word(a_row, idx);
-                        let aw_next = if bit_dx == 0 { 0 } else { Self::get_word(a_row, idx + 1) };
-                        let aligned_a = if bit_dx == 0 { aw } else { (aw << bit_dx) | (aw_next >> (32 - bit_dx)) };
+                        let aw_next = if bit_dx == 0 {
+                            0
+                        } else {
+                            Self::get_word(a_row, idx + 1)
+                        };
+                        let aligned_a = if bit_dx == 0 {
+                            aw
+                        } else {
+                            (aw << bit_dx) | (aw_next >> (32 - bit_dx))
+                        };
                         let bw = Self::get_word(b_row, w as isize);
                         let xor_result = aligned_a ^ bw;
                         err += xor_result.count_ones();
-                        if err >= best_err { break; }
+                        if err >= best_err {
+                            break;
+                        }
                     }
-                    if err >= best_err { break; }
+                    if err >= best_err {
+                        break;
+                    }
                 }
 
                 if err < best_err {
@@ -333,10 +352,7 @@ impl SymDictBuilder {
     /// Returns the dictionary (as a vector of `BitImage`s) and a vector of
     /// `ConnectedComponent`s which includes the index of the dictionary symbol
     /// that each component was matched with.
-    pub fn build(
-        &mut self,
-        image: &BitImage,
-    ) -> (Vec<BitImage>, Vec<ConnectedComponent>) {
+    pub fn build(&mut self, image: &BitImage) -> (Vec<BitImage>, Vec<ConnectedComponent>) {
         let mut components = find_connected_components(image, 4);
         let mut dictionary: Vec<BitImage> = Vec::new();
         self.exact_matches.clear();
@@ -353,7 +369,8 @@ impl SymDictBuilder {
             if self.max_error > 0 {
                 for (dict_idx, dict_symbol) in dictionary.iter().enumerate() {
                     if let Some((error, _dx, _dy)) =
-                        self.comparator.distance(&component.bitmap, dict_symbol, self.max_error)
+                        self.comparator
+                            .distance(&component.bitmap, dict_symbol, self.max_error)
                     {
                         if best_match.map_or(true, |(e, _)| error < e) {
                             best_match = Some((error, dict_idx));
@@ -375,7 +392,8 @@ impl SymDictBuilder {
             let new_symbol_idx = dictionary.len();
             component.dict_symbol_index = Some(new_symbol_idx);
             dictionary.push(component.bitmap.clone());
-            self.exact_matches.insert(component.bitmap.clone(), new_symbol_idx);
+            self.exact_matches
+                .insert(component.bitmap.clone(), new_symbol_idx);
         }
 
         (dictionary, components)
@@ -415,13 +433,16 @@ impl SymDictEncoder {
         dictionary: &[BitImage],
     ) -> Result<(), Jb2Error> {
         // 1. Encode the number of symbols in the dictionary.
-        self.nc.code_int(ac, dictionary.len() as i32, &mut self.ctx_handle_sym_count)?;
+        self.nc
+            .code_int(ac, dictionary.len() as i32, &mut self.ctx_handle_sym_count)?;
 
         // 2. Encode each symbol.
         for symbol in dictionary {
             // Encode width and height.
-            self.nc.code_int(ac, symbol.width as i32, &mut self.ctx_handle_sym_width)?;
-            self.nc.code_int(ac, symbol.height as i32, &mut self.ctx_handle_sym_height)?;
+            self.nc
+                .code_int(ac, symbol.width as i32, &mut self.ctx_handle_sym_width)?;
+            self.nc
+                .code_int(ac, symbol.height as i32, &mut self.ctx_handle_sym_height)?;
 
             // Encode the raw bitmap data using the centralized direct coding function.
             context::encode_bitmap_direct(ac, symbol, self.direct_base_context as usize)?;
@@ -430,5 +451,3 @@ impl SymDictEncoder {
         Ok(())
     }
 }
-
-

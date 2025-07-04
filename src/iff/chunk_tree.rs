@@ -102,7 +102,9 @@ impl IffChunk {
                 children,
             } => {
                 let id_str = std::str::from_utf8(&self.id).unwrap_or("????");
-                let secondary_str = std::str::from_utf8(secondary_id).unwrap_or("????").trim_end_matches('\0');
+                let secondary_str = std::str::from_utf8(secondary_id)
+                    .unwrap_or("????")
+                    .trim_end_matches('\0');
                 let full_id = format!("{}:{}", id_str, secondary_str);
                 writer.put_chunk(&full_id)?;
                 for child in children {

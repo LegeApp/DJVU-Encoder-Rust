@@ -1,7 +1,7 @@
 // src/hidden_text.rs
 
-use thiserror::Error;
 use std::io::Write;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum HiddenTextError {
@@ -90,7 +90,7 @@ impl HiddenText {
 
         Ok(())
     }
-    
+
     /// Recursively walks the tree, collecting text and assigning text offsets.
     fn flatten_text_recursive(zone: &mut Zone, full_text: &mut String) {
         if let Some(text) = &zone.text {
@@ -107,22 +107,22 @@ impl HiddenText {
 
         // Add separators based on zone type
         let sep = match zone.kind {
-            ZoneKind::Column => Some('\x0B'), // VT
-            ZoneKind::Region => Some('\x1D'), // GS
+            ZoneKind::Column => Some('\x0B'),    // VT
+            ZoneKind::Region => Some('\x1D'),    // GS
             ZoneKind::Paragraph => Some('\x1F'), // US
-            ZoneKind::Line => Some('\n'), // LF
+            ZoneKind::Line => Some('\n'),        // LF
             ZoneKind::Word => Some(' '),
             _ => None,
         };
-        
+
         if let Some(sep_char) = sep {
             if !full_text.ends_with(sep_char) {
-                 full_text.push(sep_char);
-                 zone.text_len += 1;
+                full_text.push(sep_char);
+                zone.text_len += 1;
             }
         }
     }
-    
+
     /// Recursively encodes the zone hierarchy into the binary format.
     fn encode_zone_recursive(
         &self,
@@ -135,7 +135,7 @@ impl HiddenText {
 
         let (mut x, mut y) = (zone.bbox.x as i32, zone.bbox.y as i32);
         let mut text_start_offset = zone.text_start as i32;
-        
+
         // Calculate relative coordinates and text offsets
         if let Some(p) = prev_sibling {
             text_start_offset -= (p.text_start + p.text_len) as i32;
@@ -159,7 +159,7 @@ impl HiddenText {
         write_i16(writer, y)?;
         write_i16(writer, zone.bbox.w as i32)?;
         write_i16(writer, zone.bbox.h as i32)?;
-        
+
         write_i16(writer, text_start_offset)?;
         write_u24(writer, zone.text_len as u32)?;
         write_u24(writer, zone.children.len() as u32)?;
@@ -176,11 +176,7 @@ impl HiddenText {
 
 // Helper functions for writing multi-byte integers in DjVu's format.
 fn write_u24(writer: &mut impl Write, val: u32) -> Result<(), std::io::Error> {
-    writer.write_all(&[
-        (val >> 16) as u8,
-        (val >> 8) as u8,
-        val as u8,
-    ])
+    writer.write_all(&[(val >> 16) as u8, (val >> 8) as u8, val as u8])
 }
 
 fn write_i16(writer: &mut impl Write, val: i32) -> Result<(), std::io::Error> {

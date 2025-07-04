@@ -137,7 +137,7 @@ impl<'a> IffWriter<'a> {
 
         // Store the position of the size field to be patched later.
         let size_pos = self.writer.stream_position()?;
-        
+
         // Write a placeholder for the size.
         self.writer.write_u32::<BigEndian>(0)?;
 
@@ -179,7 +179,8 @@ impl<'a> IffWriter<'a> {
 
         // Seek back, write the correct size, and return to the final position.
         self.writer.seek(SeekFrom::Start(size_pos))?;
-        self.writer.write_u32::<BigEndian>(chunk_size_field as u32)?;
+        self.writer
+            .write_u32::<BigEndian>(chunk_size_field as u32)?;
         self.writer.seek(SeekFrom::Start(final_pos))?;
 
         Ok(())

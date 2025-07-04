@@ -74,7 +74,7 @@ impl DjvuStrExt for str {
     fn to_float(&self) -> Result<f64, std::num::ParseFloatError> {
         self.trim().parse::<f64>()
     }
-    
+
     fn substr(&self, from: i32, len: Option<u32>) -> Cow<str> {
         let char_count = self.chars().count();
         if char_count == 0 {
@@ -93,7 +93,10 @@ impl DjvuStrExt for str {
             None => char_count,
         };
         let start_byte = self.char_indices().nth(start_char).map_or(0, |(i, _)| i);
-        let end_byte = self.char_indices().nth(end_char).map_or(self.len(), |(i, _)| i);
+        let end_byte = self
+            .char_indices()
+            .nth(end_char)
+            .map_or(self.len(), |(i, _)| i);
         Cow::Borrowed(&self[start_byte..end_byte])
     }
 }

@@ -6,7 +6,6 @@
 //! in-memory buffers, file-based data, and sliced views, using `Arc` for shared
 //! ownership and `bytemuck` for zero-copy conversions of DjVu data structures.
 
-
 use crate::utils::error::{DjvuError, Result};
 use bytemuck::{Pod, Zeroable};
 use std::fs::File;

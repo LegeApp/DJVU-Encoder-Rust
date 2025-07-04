@@ -13,7 +13,9 @@ pub struct Block {
 
 impl Default for Block {
     fn default() -> Self {
-        Self { buckets: [None; 64] }
+        Self {
+            buckets: [None; 64],
+        }
     }
 }
 
@@ -24,12 +26,12 @@ impl Block {
             if coeff != 0 {
                 let bucket_idx = (i / 16) as u8;
                 let coeff_idx_in_bucket = i % 16;
-                
+
                 // Ensure bucket exists
                 if self.buckets[bucket_idx as usize].is_none() {
                     self.buckets[bucket_idx as usize] = Some([0; 16]);
                 }
-                
+
                 self.buckets[bucket_idx as usize].as_mut().unwrap()[coeff_idx_in_bucket] = coeff;
             }
         }
@@ -95,20 +97,11 @@ impl CoeffMap {
 
     /// Create coefficients from an image. Corresponds to `Map::Encode::create`.
     pub fn create_from_image(img: &GrayImage, mask: Option<&GrayImage>) -> Self {
-        #[cfg(debug_assertions)]
-        println!("CoeffMap::create_from_image - Starting image processing...");
-        
         let (w, h) = img.dimensions();
         let mut map = Self::new(w as usize, h as usize);
 
-        #[cfg(debug_assertions)]
-        println!("CoeffMap::create_from_image - Created map {}x{}, padded {}x{}", w, h, map.bw, map.bh);
-
         // Allocate decomposition buffer (padded)
         let mut data16 = vec![0i16; map.bw * map.bh];
-
-        #[cfg(debug_assertions)]
-        println!("CoeffMap::create_from_image - Copying pixel data...");
 
         // Copy pixels from signed GrayImage to i16 buffer, shifting up.
         for y in 0..map.ih {
@@ -121,9 +114,6 @@ impl CoeffMap {
                 data16[y * map.bw + x] = signed_val << IW_SHIFT;
             }
         }
-
-        #[cfg(debug_assertions)]
-        println!("CoeffMap::create_from_image - Applying transforms...");
 
         // Apply masking logic if mask is provided
         if let Some(mask_img) = mask {
@@ -143,15 +133,9 @@ impl CoeffMap {
             // Apply forward_mask for multiscale masked wavelet decomposition
             masking::forward_mask(&mut data16, map.iw, map.ih, map.bw, 1, 32, &mask8, map.bw);
         } else {
-            #[cfg(debug_assertions)]
-            println!("CoeffMap::create_from_image - No mask, using standard transform...");
-            
             // Perform traditional wavelet decomposition without masking
             transform::forward(&mut data16, map.iw, map.ih, map.bw, 1, 32);
         }
-
-        #[cfg(debug_assertions)]
-        println!("CoeffMap::create_from_image - Copying coefficients to blocks...");
 
         // Copy transformed coefficients into blocks
         let blocks_w = map.bw / 32;
@@ -172,6 +156,17 @@ impl CoeffMap {
                 }
 
                 map.blocks[block_idx].read_liftblock(&liftblock);
+
+                // Debug: Print some coefficient values for the first few blocks
+                if block_idx < 3 {
+                    let dc_coeff = liftblock[ZIGZAG_LOC[0] as usize];
+                    let low_freq_coeffs: Vec<i16> =
+                        (0..4).map(|i| liftblock[ZIGZAG_LOC[i] as usize]).collect();
+                    println!(
+                        "DEBUG: Block {}: DC={}, low_freq={:?}",
+                        block_idx, dc_coeff, low_freq_coeffs
+                    );
+                }
             }
         }
 
@@ -182,7 +177,7 @@ impl CoeffMap {
     }
 
     pub fn slash_res(&mut self, res: usize) {
-        // Halve the image dimensions  
+        // Halve the image dimensions
         self.iw = (self.iw + res - 1) / res;
         self.ih = (self.ih + res - 1) / res;
         // Update padded dimensions
@@ -190,7 +185,7 @@ impl CoeffMap {
         self.bh = (self.ih + 31) & !31;
         // Update number of blocks
         self.num_blocks = (self.bw * self.bh) / (32 * 32);
-        
+
         let min_bucket = match res {
             0..=1 => return,
             2..=3 => 16,
@@ -199,7 +194,7 @@ impl CoeffMap {
         };
         // Adjust blocks vector size
         self.blocks.resize(self.num_blocks, Block::default());
-        
+
         for block in self.blocks.iter_mut() {
             for buckno in min_bucket..64 {
                 block.zero_bucket(buckno as u8);

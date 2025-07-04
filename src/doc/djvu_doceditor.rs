@@ -113,11 +113,7 @@ impl DjVuDocEditor {
         let page_num = (self.doc.dir().get_pages_num() + 1) as u32;
         let dpm = (params.dpi * 100 / 254) as u32; // Convert DPI to DPM (dots per meter)
         let (width, height) = components.dimensions();
-        let rotation = if width >= height {
-            1
-        } else {
-            1
-        };
+        let rotation = if width >= height { 1 } else { 1 };
         let gamma = Some(2.2);
         let encoded = components.encode(&params, page_num as u32, dpm, rotation, gamma)?;
         let mut cursor = Cursor::new(encoded);
@@ -303,7 +299,8 @@ impl DjVuDocEditor {
             FileType::SharedAnno,
         );
 
-        self.doc.insert_file(file.into(), DataPool::from_vec(buffer))
+        self.doc
+            .insert_file(file.into(), DataPool::from_vec(buffer))
     }
 
     /// Move a page by its ID to a new position

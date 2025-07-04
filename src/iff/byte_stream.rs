@@ -38,7 +38,10 @@ pub trait ByteStream: Read + Write {
 
     fn write_u24(&mut self, value: u32) -> Result<()> {
         if value > 0xFFFFFF {
-            eprintln!("ERROR: Trying to write u24 value {} which is too large (max={})", value, 0xFFFFFF);
+            eprintln!(
+                "ERROR: Trying to write u24 value {} which is too large (max={})",
+                value, 0xFFFFFF
+            );
             return Err(DjvuError::InvalidArg("Value too large for u24".to_string()));
         }
         let bytes = [
@@ -79,7 +82,10 @@ pub trait ByteStream: Read + Write {
     fn write_u24_slice(&mut self, values: &[u32]) -> Result<()> {
         for &value in values {
             if value > 0xFFFFFF {
-                eprintln!("ERROR: Trying to write u24 slice value {} which is too large (max={})", value, 0xFFFFFF);
+                eprintln!(
+                    "ERROR: Trying to write u24 slice value {} which is too large (max={})",
+                    value, 0xFFFFFF
+                );
                 return Err(DjvuError::InvalidArg("Value too large for u24".to_string()));
             }
         }
