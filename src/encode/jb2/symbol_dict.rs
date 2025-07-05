@@ -2,12 +2,13 @@
 //! and provides utilities for their manipulation, such as sorting for optimal
 //! dictionary encoding.
 
-use crate::arithmetic_coder::ArithmeticEncoder;
+use crate::encode::zc::{ZEncoder, BitContext};
 use crate::encode::jb2::context;
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::num_coder::NumCoder;
 use bitvec::order::Msb0;
 use bitvec::prelude::*;
+use lutz;
 use once_cell::unsync::OnceCell;
 use std::collections::HashMap;
 use std::error::Error;
@@ -155,7 +156,12 @@ impl lutz::Image for BitImage {
     }
 
     fn has_pixel(&self, x: u32, y: u32) -> bool {
-        x < self.width as u32 && y < self.height as u32
+        // Return true only if there's a foreground pixel at this location
+        if x < self.width as u32 && y < self.height as u32 {
+            self.get_pixel_unchecked(x as usize, y as usize)
+        } else {
+            false
+        }
     }
 }
 
@@ -404,45 +410,64 @@ impl SymDictBuilder {
 pub struct SymDictEncoder {
     nc: NumCoder,
     direct_base_context: u32,
-    ctx_handle_sym_count: u32,
-    ctx_handle_sym_width: u32,
-    ctx_handle_sym_height: u32,
+    ctx_sym_count: usize,
+    ctx_sym_width: usize,
+    ctx_sym_height: usize,
 }
 
 impl SymDictEncoder {
     /// Creates a new symbol dictionary encoder.
     pub fn new(base_context_index: u32, max_contexts: u32, direct_base_context: u32) -> Self {
-        let mut nc = NumCoder::new(base_context_index, max_contexts);
-        let ctx_handle_sym_count = nc.alloc_context();
-        let ctx_handle_sym_width = nc.alloc_context();
-        let ctx_handle_sym_height = nc.alloc_context();
+        let nc = NumCoder::new(base_context_index as u8, max_contexts as u8);
+        let ctx_sym_count = base_context_index as usize;
+        let ctx_sym_width = base_context_index as usize + 1;
+        let ctx_sym_height = base_context_index as usize + 2;
 
         Self {
             nc,
             direct_base_context,
-            ctx_handle_sym_count,
-            ctx_handle_sym_width,
-            ctx_handle_sym_height,
+            ctx_sym_count,
+            ctx_sym_width,
+            ctx_sym_height,
         }
     }
 
     /// Encodes the dictionary symbols to the arithmetic coder.
-    pub fn encode<W: Write, const N: usize>(
+    pub fn encode<W: Write>(
         &mut self,
-        ac: &mut ArithmeticEncoder<W, N>,
+        ac: &mut ZEncoder<W>,
         dictionary: &[BitImage],
+        contexts: &mut [u8], // Add global context array parameter
     ) -> Result<(), Jb2Error> {
         // 1. Encode the number of symbols in the dictionary.
-        self.nc
-            .code_int(ac, dictionary.len() as i32, &mut self.ctx_handle_sym_count)?;
+        self.nc.encode_integer(
+            ac,
+            contexts,
+            self.ctx_sym_count,
+            dictionary.len() as i32,
+            0,
+            65535,
+        )?;
 
         // 2. Encode each symbol.
         for symbol in dictionary {
             // Encode width and height.
-            self.nc
-                .code_int(ac, symbol.width as i32, &mut self.ctx_handle_sym_width)?;
-            self.nc
-                .code_int(ac, symbol.height as i32, &mut self.ctx_handle_sym_height)?;
+            self.nc.encode_integer(
+                ac,
+                contexts,
+                self.ctx_sym_width,
+                symbol.width as i32,
+                1,
+                65535,
+            )?;
+            self.nc.encode_integer(
+                ac,
+                contexts,
+                self.ctx_sym_height,
+                symbol.height as i32,
+                1,
+                65535,
+            )?;
 
             // Encode the raw bitmap data using the centralized direct coding function.
             context::encode_bitmap_direct(ac, symbol, self.direct_base_context as usize)?;

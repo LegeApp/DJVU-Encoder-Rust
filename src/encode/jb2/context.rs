@@ -1,6 +1,6 @@
 // src/jb2/context.rs
 
-use crate::arithmetic_coder::ArithmeticEncoder;
+use crate::encode::zc::{ZEncoder, BitContext};
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::symbol_dict::BitImage;
 use std::io::Write;
@@ -98,8 +98,9 @@ fn get_refinement_context(
 ///
 /// This is used to encode a symbol instance that is a refinement of a symbol
 /// from the dictionary.
-pub fn encode_bitmap_refine<W: Write, const N: usize>(
-    ac: &mut ArithmeticEncoder<W, N>,
+pub fn encode_bitmap_refine<W: Write>(
+
+    ac: &mut ZEncoder<W>,
     image: &BitImage,
     reference: &BitImage,
     cx_offset: i32, // relative offset of `image` from `reference`
@@ -133,7 +134,7 @@ pub fn encode_bitmap_refine<W: Write, const N: usize>(
 
             // Get the pixel value and encode it
             let pixel = image.get_pixel_unchecked(x as usize, y as usize);
-            ac.encode_bit(context + base_context_index, pixel)?;
+            ac.encode(pixel, &mut ((context + base_context_index) as u8))?;
 
             // Update the temporary image with the pixel we just coded
             if pixel {
@@ -148,8 +149,9 @@ pub fn encode_bitmap_refine<W: Write, const N: usize>(
 ///
 /// This function uses an efficient, row-based approach to minimize redundant
 /// calculations and boundary checks, making it suitable for encoding entire symbols.
-pub fn encode_bitmap_direct<W: Write, const N: usize>(
-    ac: &mut ArithmeticEncoder<W, N>,
+pub fn encode_bitmap_direct<W: Write>(
+
+    ac: &mut ZEncoder<W>,
     image: &BitImage,
     base_context_index: usize,
 ) -> Result<(), Jb2Error> {
@@ -162,7 +164,8 @@ pub fn encode_bitmap_direct<W: Write, const N: usize>(
 
             // Get the pixel value and encode it
             let pixel = image.get_pixel_unchecked(x as usize, y as usize);
-            ac.encode_bit(final_context, pixel)?
+            ac.encode(pixel, &mut (final_context as u8))?
+
         }
     }
     Ok(())

@@ -5,7 +5,7 @@ use crate::encode::{
     jb2::encoder::JB2Encoder,
     symbol_dict::BitImage,
 };
-use crate::iff::iff::IffWriter;
+use crate::iff::{iff::IffWriter, bs_byte_stream::bzz_compress};
 use crate::{DjvuError, Result};
 use byteorder::{BigEndian, WriteBytesExt};
 use image::RgbImage;
@@ -25,6 +25,8 @@ pub struct PageEncodeParams {
     pub use_iw44: bool,
     /// Whether to encode in color (true) or grayscale (false)
     pub color: bool,
+    /// Target SNR in dB for IW44 encoding
+    pub decibels: Option<f32>,
 }
 
 impl Default for PageEncodeParams {
@@ -35,6 +37,7 @@ impl Default for PageEncodeParams {
             fg_quality: 90,
             use_iw44: true, // Default to IW44 for background
             color: true,    // Default to color encoding
+            decibels: None,
         }
     }
 }
@@ -130,8 +133,8 @@ impl PageComponents {
             // Write AT&T magic bytes first
             writer.write_magic_bytes()?;
 
-            // Start the FORM:DJVU chunk
-            writer.put_chunk("FORM:DJVU")?;
+            // Manually write the FORM:DJVU header to get its size position.
+            let form_size_pos = writer.write_chunk_header("FORM:DJVU")?;
 
             // Write INFO chunk (required for all pages)
             self.write_info_chunk(
@@ -143,28 +146,71 @@ impl PageComponents {
                 gamma,
             )?;
 
-            // Encode and write background if present
+            // --- BG44: Always emit a blank background for bitonal/JB2 pages ---
+            let mut wrote_bg44 = false;
             if let Some(bg_img) = &self.background {
                 if params.use_iw44 {
-                    self.encode_iw44_background(bg_img, &mut writer, params)?
+                    self.encode_iw44_background(bg_img, &mut writer, params)?;
+                    wrote_bg44 = true;
                 } else {
-                    // JB2 background encoding from RGB is not supported.
-                    // A bitonal image should be provided as a foreground component instead.
                     return Err(DjvuError::InvalidOperation(
                         "JB2 background encoding requires a bitonal image. Use foreground instead."
                             .to_string(),
                     ));
                 }
             }
-
-            // Encode and write foreground if present
-            if let Some(fg_img) = &self.foreground {
-                self.encode_jb2_foreground(fg_img, &mut writer, params.fg_quality)?;
+            // If no background but JB2 content exists, emit an all-white BG44
+            if !wrote_bg44 && (self.foreground.is_some() || self.mask.is_some()) {
+                let (w, h) = (self.width, self.height);
+                let white_bg = RgbImage::from_pixel(w, h, image::Rgb([255, 255, 255]));
+                self.encode_iw44_background(&white_bg, &mut writer, params)?;
             }
 
-            // Encode and write mask if present
-            if let Some(mask_img) = &self.mask {
-                self.encode_jb2_mask(mask_img, &mut writer)?;
+            // --- Djbz + Sjbz: JB2 dictionary and mask/foreground ---
+            // If JB2 content is present (foreground or mask), emit Djbz and then Sjbz
+            if let Some(fg_img) = &self.foreground {
+                use crate::encode::jb2::encoder::JB2Encoder;
+                let mut jb2_encoder = JB2Encoder::new(Vec::new());
+                // Build dictionary and connected components
+                let mut dict_builder = crate::encode::jb2::symbol_dict::SymDictBuilder::new(0);
+                let (dictionary, components) = dict_builder.build(fg_img);
+                // --- Djbz ---
+                let dict_raw = jb2_encoder.encode_dictionary_chunk(&dictionary)
+                    .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
+                let dict_bzz = bzz_compress(&dict_raw, 256)
+                    .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
+                writer.put_chunk("Djbz")?;
+                writer.write_all(&dict_bzz)?;
+                writer.close_chunk()?;
+                // --- Sjbz ---
+                let sjbz_raw = jb2_encoder.encode_page_chunk(&components)
+                    .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
+                let sjbz_bzz = bzz_compress(&sjbz_raw, 256)
+                    .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
+                writer.put_chunk("Sjbz")?;
+                writer.write_all(&sjbz_bzz)?;
+                writer.close_chunk()?;
+            } else if let Some(mask_img) = &self.mask {
+                use crate::encode::jb2::encoder::JB2Encoder;
+                let mut jb2_encoder = JB2Encoder::new(Vec::new());
+                let mut dict_builder = crate::encode::jb2::symbol_dict::SymDictBuilder::new(0);
+                let (dictionary, components) = dict_builder.build(mask_img);
+                // --- Djbz ---
+                let dict_raw = jb2_encoder.encode_dictionary_chunk(&dictionary)
+                    .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
+                let dict_bzz = bzz_compress(&dict_raw, 256)
+                    .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
+                writer.put_chunk("Djbz")?;
+                writer.write_all(&dict_bzz)?;
+                writer.close_chunk()?;
+                // --- Sjbz ---
+                let sjbz_raw = jb2_encoder.encode_page_chunk(&components)
+                    .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
+                let sjbz_bzz = bzz_compress(&sjbz_raw, 256)
+                    .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
+                writer.put_chunk("Sjbz")?;
+                writer.write_all(&sjbz_bzz)?;
+                writer.close_chunk()?;
             }
 
             // Write text/annotations if present
@@ -172,8 +218,8 @@ impl PageComponents {
                 self.write_text_chunk(text, &mut writer)?;
             }
 
-            // Close the FORM:DJVU chunk
-            writer.close_chunk()?;
+            // Now that all content is written, patch the FORM chunk's size.
+            writer.patch_chunk_size(form_size_pos)?;
         }
         Ok(output)
     }
@@ -253,24 +299,37 @@ impl PageComponents {
         }
 
         // Configure IW44 encoder with proper quality-based parameters
-        // Calculate reasonable slice count based on quality (10-100 slices for normal quality)
-        let slice_count = 50; // Enough for multiple bit-planes
         println!(
-            "DEBUG: Configuring IW44 encoder with {} slices for quality {}",
-            slice_count, params.bg_quality
+            "DEBUG: Configuring IW44 encoder with quality {:?}",
+            params.decibels
         );
 
         let iw44_params = IW44EncoderParams {
-            slices: Some(slice_count),
-            bytes: None,
-            decibels: None,
+            decibels: params.decibels,
             crcb_mode,
-            max_slices: Some(200), // Reasonable safety limit
             ..Default::default()
         };
 
-        // Encode the image
-        let mut encoder = IWEncoder::from_rgb(img, None, iw44_params)
+        // If a mask is present, convert it to GrayImage and pass to IWEncoder for mask-aware encoding
+        let mask_gray = if let Some(mask_bitimg) = &self.mask {
+            // Convert BitImage to GrayImage (1=masked, 0=unmasked)
+            let (mw, mh) = (mask_bitimg.width as u32, mask_bitimg.height as u32);
+            let mut mask_buf = vec![0u8; (mw * mh) as usize];
+            for y in 0..mh {
+                for x in 0..mw {
+                    mask_buf[(y * mw + x) as usize] = if mask_bitimg.get_pixel_unchecked(x as usize, y as usize) { 1 } else { 0 };
+                }
+            }
+            Some(image::GrayImage::from_raw(mw, mh, mask_buf).expect("Failed to create GrayImage from mask"))
+        } else {
+            None
+        };
+
+        if mask_gray.is_some() {
+            println!("DEBUG: Using mask-aware IW44 encoding for background");
+        }
+
+        let mut encoder = IWEncoder::from_rgb(img, mask_gray.as_ref(), iw44_params)
             .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
 
         // Choose the correct chunk type for IW44 background images:
@@ -283,48 +342,50 @@ impl PageComponents {
             "BG44" // Use BG44 for background images in DjVu pages
         };
 
-        // Encode all slices, writing one chunk per slice with the proper 'more' flag
+        // Encode and write IW44 data in proper chunks according to DjVu spec
+        // According to the DjVu spec example, chunks should contain multiple slices:
+        // BG44 [935] IW4 data #1, 74 slices
+        // BG44 [1672] IW4 data #2, 10 slices  
+        // BG44 [815] IW4 data #3, 4 slices
+        // BG44 [9976] IW4 data #4, 9 slices
+        
         let mut chunk_count = 0;
+        
+        // Progressive slice grouping strategy:
+        // - First chunk: Many slices (high-frequency data)
+        // - Subsequent chunks: Fewer slices each time
+        let slice_grouping = [50, 20, 10, 5, 5, 5]; // Decreasing slice counts per chunk
+        let mut grouping_index = 0;
+        
         loop {
+            let target_slices = slice_grouping[grouping_index.min(slice_grouping.len() - 1)];
             let (iw44_stream, more) = encoder
-                .encode_chunk()
+                .encode_chunk(target_slices)
                 .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
 
-            // Don't write empty slices - just break out
             if iw44_stream.is_empty() {
-                println!("DEBUG: Encoder returned empty slice, stopping");
+                println!("DEBUG: Encoder returned empty chunk, stopping.");
                 break;
             }
 
-            // Write this slice as a separate BG44/FG44 chunk
+            chunk_count += 1;
+            println!(
+                "DEBUG: Writing IW44 chunk {}, {} bytes",
+                chunk_count,
+                iw44_stream.len()
+            );
+
             writer.put_chunk(iw_chunk_id)?;
             writer.write_all(&iw44_stream)?;
             writer.close_chunk()?;
 
-            chunk_count += 1;
-            println!(
-                "DEBUG: Writing {} chunk {}, size: {} bytes, more: {}",
-                iw_chunk_id,
-                chunk_count,
-                iw44_stream.len(),
-                more
-            );
-
             if !more {
                 break;
             }
-
-            // Safety check to prevent infinite loops
-            if chunk_count >= 100 {
-                eprintln!(
-                    "Warning: Too many IW44 chunks generated ({}), stopping",
-                    chunk_count
-                );
-                break;
-            }
+            
+            // Move to next grouping size for subsequent chunks
+            grouping_index += 1;
         }
-
-        println!("DEBUG: Total IW44 chunks written: {}", chunk_count);
 
         Ok(())
     }
@@ -338,11 +399,16 @@ impl PageComponents {
     ) -> Result<()> {
         // Create JB2 encoder and encode
         let mut jb2_encoder = JB2Encoder::new(Vec::new());
-        let encoded = jb2_encoder.encode_page(img, 0)?;
+        let jb2_raw = jb2_encoder.encode_page(img, 0)?;
 
-        // Write FGbz chunk
-        writer.put_chunk("FGbz")?;
-        writer.write_all(&encoded)?;
+        // BZZ-compress the JB2 data as required by DjVu spec (§3.2.5)
+        let sjbz_payload = bzz_compress(&jb2_raw, 256)
+            .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
+
+        // Write Sjbz chunk for JB2 bitmap data (shapes and positions)
+        // Note: FGbz is for JB2 colors, Sjbz is for the actual bitmap content
+        writer.put_chunk("Sjbz")?;
+        writer.write_all(&sjbz_payload)?;
         writer.close_chunk()?;
 
         Ok(())
@@ -352,11 +418,15 @@ impl PageComponents {
     fn encode_jb2_mask(&self, img: &BitImage, writer: &mut IffWriter) -> Result<()> {
         // Create JB2 encoder and encode
         let mut jb2_encoder = JB2Encoder::new(Vec::new());
-        let encoded = jb2_encoder.encode_page(img, 0)?;
+        let jb2_raw = jb2_encoder.encode_page(img, 0)?;
+
+        // BZZ-compress the JB2 data as required by DjVu spec
+        let sjbz_payload = bzz_compress(&jb2_raw, 256)
+            .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
 
         // Write Sjbz chunk
         writer.put_chunk("Sjbz")?;
-        writer.write_all(&encoded)?;
+        writer.write_all(&sjbz_payload)?;
         writer.close_chunk()?;
 
         Ok(())

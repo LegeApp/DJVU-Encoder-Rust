@@ -126,6 +126,41 @@ impl<'a> IffWriter<'a> {
         Ok(())
     }
 
+    /// Begins a new chunk, writes its header with a placeholder size, and returns the position of the size field.
+    /// The caller is responsible for calling `patch_chunk_size` later.
+    pub fn write_chunk_header(&mut self, full_id: &str) -> Result<u64> {
+        let (id, secondary_id) = Self::parse_full_id(full_id)?;
+        self.writer.write_all(&id)?;
+        let size_pos = self.writer.stream_position()?;
+        self.writer.write_u32::<BigEndian>(0)?; // Placeholder size
+        if let Some(sid) = secondary_id {
+            self.writer.write_all(&sid)?;
+        }
+        Ok(size_pos)
+    }
+
+    /// Patches the size of a chunk at a previously saved position.
+    /// Calculates size from `size_pos` to current stream position, writes it, and adds padding.
+    pub fn patch_chunk_size(&mut self, size_pos: u64) -> Result<()> {
+        let end_pos = self.writer.stream_position()?;
+        // The content size is everything from after the size field to the current position.
+        let content_size = end_pos - (size_pos + 4);
+
+        // Add padding if content size is odd. The padding byte is not part of the size.
+        if (content_size & 1) != 0 {
+            self.writer.write_all(&[0])?;
+        }
+
+        let final_pos = self.writer.stream_position()?;
+
+        // Seek back, write the real size, and restore position.
+        self.writer.seek(SeekFrom::Start(size_pos))?;
+        self.writer.write_u32::<BigEndian>(content_size as u32)?;
+        self.writer.seek(SeekFrom::Start(final_pos))?;
+
+        Ok(())
+    }
+
     /// Begins a new chunk with the given ID.
     ///
     /// For composite chunks, the ID should be in the format "FORM:DJVU".

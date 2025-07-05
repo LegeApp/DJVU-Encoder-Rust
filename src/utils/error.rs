@@ -56,8 +56,8 @@ impl From<crate::encode::jb2::error::Jb2Error> for DjvuError {
     }
 }
 
-impl From<crate::encode::zp::ZpCodecError> for DjvuError {
-    fn from(err: crate::encode::zp::ZpCodecError) -> Self {
+impl From<crate::encode::zc::ZCodecError> for DjvuError {
+    fn from(err: crate::encode::zc::ZCodecError) -> Self {
         DjvuError::EncodingError(err.to_string())
     }
 }

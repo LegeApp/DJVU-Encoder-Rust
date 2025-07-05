@@ -1,4 +1,3 @@
-use crate::encode::zp::zp_codec::{ZpCodecError, ZpEncoder as ZpCodecEncoder};
 use crate::iff::bs_byte_stream::bzz_compress;
 use crate::iff::byte_stream::{ByteStream, MemoryStream};
 use crate::utils::error::{DjvuError, Result};

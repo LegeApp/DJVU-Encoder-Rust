@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create encoding parameters
     let mut params = PageEncodeParams::default();
     params.color = !use_grayscale;
-    
+
     if use_grayscale {
         println!("Encoding in grayscale mode.");
     } else {
@@ -61,8 +61,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Writing document to '{}'...", output_path);
     file.write_all(&page_data)?;
 
-    println!("\n✅ Successfully created single-page DjVu document: {}", output_path);
-    println!("   File size: {} bytes", std::fs::metadata(output_path)?.len());
+    println!(
+        "\n✅ Successfully created single-page DjVu document: {}",
+        output_path
+    );
+    println!(
+        "   File size: {} bytes",
+        std::fs::metadata(output_path)?.len()
+    );
     println!("   Pages: 1");
     println!("   Source Image: {}", image_path);
     println!("   Image Dimensions: {}x{}", width, height);

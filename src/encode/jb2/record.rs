@@ -3,7 +3,7 @@
 //! This module is responsible for encoding the sequence of symbol instances
 //! that make up the content of a page.
 
-use crate::arithmetic_coder::ArithmeticEncoder;
+use crate::encode::zc::{ZEncoder, BitContext};
 use crate::encode::jb2::context;
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::num_coder::NumCoder;
@@ -25,10 +25,10 @@ pub struct RecordStreamEncoder {
     nc: NumCoder,
     rlp: RelLocPredictor,
     refinement_base_context: u32,
-    // Context handles for the NumCoder
-    ctx_handle_rec_type: u32,
-    ctx_handle_sym_id: u32,
-    ctx_handle_rel_loc: u32,
+    // Context handles for specific operations
+    ctx_sym_id: usize,
+    ctx_rel_loc: usize,
+    ctx_rec_type: usize,
 }
 
 impl RecordStreamEncoder {
@@ -42,30 +42,31 @@ impl RecordStreamEncoder {
         let nc_contexts = max_contexts - rlp_contexts;
         let nc_base_index = base_context_index + rlp_contexts;
 
-        let mut nc = NumCoder::new(nc_base_index, nc_contexts);
+        let nc = NumCoder::new(nc_base_index.try_into().unwrap(), nc_contexts.try_into().unwrap());
 
-        // Allocate context handles from the number coder.
-        let ctx_handle_rec_type = nc.alloc_context();
-        let ctx_handle_sym_id = nc.alloc_context();
-        let ctx_handle_rel_loc = nc.alloc_context();
+        // Allocate context indices (not handles)
+        let ctx_rec_type = nc_base_index as usize;
+        let ctx_sym_id = nc_base_index as usize + 1;
+        let ctx_rel_loc = nc_base_index as usize + 2;
 
         Self {
             nc,
             rlp: RelLocPredictor::new(base_context_index),
             refinement_base_context,
-            ctx_handle_rec_type,
-            ctx_handle_sym_id,
-            ctx_handle_rel_loc,
+            ctx_rec_type,
+            ctx_sym_id,
+            ctx_rel_loc,
         }
     }
 
     /// Encodes a single connected component as a record, potentially as a refinement.
-    pub fn code_record<W: Write, const N: usize>(
+    pub fn code_record<W: Write>(
         &mut self,
-        ac: &mut ArithmeticEncoder<W, N>,
+        ac: &mut ZEncoder<W>,
         component: &ConnectedComponent,
         dictionary: &[BitImage],
         is_refinement: bool,
+        contexts: &mut [u8], // Add global context array parameter
     ) -> Result<(), Jb2Error> {
         let rec_type = if is_refinement {
             RecordType::SymbolRefinement
@@ -74,13 +75,18 @@ impl RecordStreamEncoder {
         };
 
         // 1. Encode the record type.
-        self.code_rec_type(ac, rec_type)?;
+        self.code_rec_type(ac, rec_type, contexts)?;
 
         // 2. Encode the symbol ID.
         let sym_id = component.dict_symbol_index.unwrap_or(0);
-        let mut ctx_handle = self.ctx_handle_sym_id;
-        self.nc.code_int(ac, sym_id as i32, &mut ctx_handle)?;
-        self.ctx_handle_sym_id = ctx_handle;
+        self.nc.encode_integer(
+            ac,
+            contexts,
+            self.ctx_sym_id,
+            sym_id as i32,
+            0,
+            dictionary.len() as i32 - 1,
+        )?;
 
         // 3. Encode the location (and get the relative offset for refinement).
         // Get the predicted location
@@ -95,11 +101,9 @@ impl RecordStreamEncoder {
         let dx = component.bounds.x as i32 - pred_dx;
         let dy = component.bounds.y as i32 - pred_dy;
 
-        // Encode the relative location
-        let mut ctx_handle = self.ctx_handle_rel_loc;
-        self.nc.code_int(ac, dx, &mut ctx_handle)?;
-        self.nc.code_int(ac, dy, &mut ctx_handle)?;
-        self.ctx_handle_rel_loc = ctx_handle;
+        // Encode the relative location using reasonable bounds
+        self.nc.encode_integer(ac, contexts, self.ctx_rel_loc, dx, -32768, 32767)?;
+        self.nc.encode_integer(ac, contexts, self.ctx_rel_loc + 1, dy, -32768, 32767)?;
 
         // 4. If it's a refinement, encode the actual bitmap differences.
         if is_refinement {
@@ -118,17 +122,20 @@ impl RecordStreamEncoder {
     }
 
     /// Encodes the record type using the number coder.
-    fn code_rec_type<W: Write, const N: usize>(
+    fn code_rec_type<W: Write>(
         &mut self,
-        ac: &mut ArithmeticEncoder<W, N>,
+        ac: &mut ZEncoder<W>,
         rec_type: RecordType,
+        contexts: &mut [u8],
     ) -> Result<(), Jb2Error> {
-        // We use a simple binary encoding for the two record types.
-        let bit = match rec_type {
-            RecordType::SymbolInstance => false,
-            RecordType::SymbolRefinement => true,
-        };
-        self.nc
-            .code_int(ac, if bit { 1 } else { 0 }, &mut self.ctx_handle_rec_type)
+        // Encode record type as integer (1 for SymbolInstance, 2 for SymbolRefinement)
+        self.nc.encode_integer(
+            ac,
+            contexts,
+            self.ctx_rec_type,
+            rec_type as i32,
+            1,
+            2,
+        )
     }
 }

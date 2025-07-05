@@ -103,17 +103,23 @@ impl CoeffMap {
         // Allocate decomposition buffer (padded)
         let mut data16 = vec![0i16; map.bw * map.bh];
 
-        // Copy pixels from signed GrayImage to i16 buffer, shifting up.
+        // Copy pixels from GrayImage to i16 buffer, shifting up.
+        // Note: The GrayImage here comes from signed Y channel data that was
+        // converted back to unsigned 0-255 range, so we can use it directly.
         for y in 0..map.ih {
             for x in 0..map.iw {
-                // Convert the u8 pixel (0..255) back to signed range (-128..127)
-                // by subtracting 128 before scaling. This matches the original
-                // DjVu reference implementation which expects signed luminance.
+                // The GrayImage contains the Y channel in 0-255 range.
+                // Apply IW_SHIFT scaling as per DjVu specification.
                 let pixel_u8 = img.get_pixel(x as u32, y as u32)[0] as i16;
-                let signed_val = pixel_u8 - 128; // range: -128..127
-                data16[y * map.bw + x] = signed_val << IW_SHIFT;
+                data16[y * map.bw + x] = pixel_u8 << IW_SHIFT;
             }
         }
+
+        // Debug: Print some pixel values before transform
+        println!("DEBUG: Before transform - first 3 pixels: {}, {}, {}", 
+                 data16[0], data16[1], data16[2]);
+        println!("DEBUG: Pixel shift: original Y {} -> scaled {}", 
+                 img.get_pixel(0, 0)[0], data16[0]);
 
         // Apply masking logic if mask is provided
         if let Some(mask_img) = mask {
@@ -134,8 +140,13 @@ impl CoeffMap {
             masking::forward_mask(&mut data16, map.iw, map.ih, map.bw, 1, 32, &mask8, map.bw);
         } else {
             // Perform traditional wavelet decomposition without masking
-            transform::forward(&mut data16, map.iw, map.ih, map.bw, 1, 32);
+            // Fixed: begin=0 to include finest scale (scale=1) transform
+            transform::Encode::forward(&mut data16, map.iw, map.ih, map.bw, 0, 5);
         }
+
+        // Debug: Print some coefficient values after transform
+        println!("DEBUG: After transform - first 3 coeffs: {}, {}, {}", 
+                 data16[0], data16[1], data16[2]);
 
         // Copy transformed coefficients into blocks
         let blocks_w = map.bw / 32;
@@ -166,6 +177,16 @@ impl CoeffMap {
                         "DEBUG: Block {}: DC={}, low_freq={:?}",
                         block_idx, dc_coeff, low_freq_coeffs
                     );
+                    
+                    // Debug: Check zigzag mapping for first 16 coefficients
+                    if block_idx == 0 {
+                        println!("DEBUG: First 16 zigzag mappings and values:");
+                        for i in 0..16 {
+                            let loc = ZIGZAG_LOC[i] as usize;
+                            let val = liftblock[loc];
+                            println!("  zigzag[{}] -> liftblock[{}] = {}", i, loc, val);
+                        }
+                    }
                 }
             }
         }

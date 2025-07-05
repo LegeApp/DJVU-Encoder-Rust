@@ -3,7 +3,7 @@
 //! This module implements the BZZ compression algorithm as required by the DjVu specification.
 //! It is a port of the C++ BSByteStream implementation from DjVuLibre.
 
-use crate::encode::zp::{BitContext, ZpEncoder};
+use crate::encode::zc::{BitContext, ZEncoder};
 use crate::utils::error::{DjvuError, Result};
 use std::io::Write;
 
@@ -16,7 +16,7 @@ const FREQS0: u32 = 100000; // Thresholds for estimation speed
 const FREQS1: u32 = 1000000;
 
 pub struct BsEncoder<W: Write> {
-    zp_encoder: ZpEncoder<W>,
+    zp_encoder: ZEncoder<W>,
     buffer: Vec<u8>,
     block_size: usize,
 }
@@ -24,7 +24,7 @@ pub struct BsEncoder<W: Write> {
 impl<W: Write> BsEncoder<W> {
     pub fn new(writer: W, block_size_k: usize) -> Result<Self> {
         let block_size = (block_size_k * 1024).clamp(MIN_BLOCK_SIZE, MAX_BLOCK_SIZE);
-        let zp_encoder = ZpEncoder::new(writer, true)?; // DjVu compatibility mode
+        let zp_encoder = ZEncoder::new(writer, true)?; // DjVu compatibility mode
         Ok(Self {
             zp_encoder,
             buffer: Vec::with_capacity(block_size + OVERFLOW),
@@ -241,7 +241,7 @@ impl<W: Write> BsEncoder<W> {
         for i in (0..bits).rev() {
             let b = ((x >> i) & 1) != 0;
             println!("DEBUG BZZ: encode_raw bit={}", b);
-            self.zp_encoder.encode_raw(b)?;
+            self.zp_encoder.encode(b, &mut 0)?;
         }
         Ok(())
     }
@@ -338,7 +338,7 @@ impl<W: Write> Write for BsEncoder<W> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.encode_block()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        // Note: ZpEncoder doesn't have a public flush method, finish() will be called in Drop
+        // Note: ZEncoder doesn't have a public flush method, finish() will be called in Drop
         Ok(())
     }
 }
@@ -353,8 +353,8 @@ impl<W: Write> Drop for BsEncoder<W> {
         } else {
             println!("DEBUG BZZ: ERROR writing EOF marker!");
         }
-        // Note: ZpEncoder will be dropped naturally, which calls its Drop impl that flushes
-        println!("DEBUG BZZ: BsEncoder drop complete, ZpEncoder will be dropped next");
+        // Note: ZEncoder will be dropped naturally, which calls its Drop impl that flushes
+        println!("DEBUG BZZ: BsEncoder drop complete, ZEncoder will be dropped next");
     }
 }
 

@@ -4,8 +4,7 @@
 //! dictionary encoder, record stream encoder) together to provide a simple
 //! public API for encoding a full JB2 page.
 
-use crate::arithmetic_coder::ArithmeticEncoder;
-use crate::arithtable::MQ_STATE_TABLE;
+use crate::encode::zc::{ZEncoder, BitContext};
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::record::RecordStreamEncoder;
 use crate::encode::jb2::symbol_dict::{
@@ -17,15 +16,16 @@ use std::io::{Cursor, Write};
 
 // Context partitioning for the JB2 encoder.
 // We need separate context pools for different parts of the encoding process.
+// These are ALLOCATED context counts, not maximum context values.
 
-// 1. Contexts for direct bitmap coding (10-bit context).
-const DIRECT_BITMAP_CONTEXTS: u32 = 1 << 10; // 1024 contexts
-                                             // 2. Contexts for refinement bitmap coding (13-bit context).
-const REFINEMENT_BITMAP_CONTEXTS: u32 = 1 << 13; // 8192 contexts
-                                                 // 3. Contexts for the symbol dictionary's number coder.
+// 1. Contexts for direct bitmap coding (allocate a reasonable subset).
+const DIRECT_BITMAP_CONTEXTS: u32 = 64; // Much smaller allocation
+// 2. Contexts for refinement bitmap coding (allocate a reasonable subset).
+const REFINEMENT_BITMAP_CONTEXTS: u32 = 96; // Much smaller allocation
+// 3. Contexts for the symbol dictionary's number coder.
 const SYM_DICT_NC_CONTEXTS: u32 = 64;
 // 4. Contexts for the record stream's number coder.
-const RECORD_STREAM_NC_CONTEXTS: u32 = 128;
+const RECORD_STREAM_NC_CONTEXTS: u32 = 32;
 
 // Base indices for each context pool.
 const DIRECT_BITMAP_BASE: u32 = 0;
@@ -80,52 +80,44 @@ impl<W: Write> JB2Encoder<W> {
     }
 
     /// Encodes and writes the JB2DS (dictionary) chunk.
-    fn encode_dictionary_chunk(&mut self, dictionary: &[BitImage]) -> Result<Vec<u8>, Jb2Error> {
+    pub fn encode_dictionary_chunk(&mut self, dictionary: &[BitImage]) -> Result<Vec<u8>, Jb2Error> {
         // Store the dictionary for later use in page encoding.
         self.dictionary = dictionary.to_vec();
 
         let chunk_data = {
             let mut buffer = Cursor::new(Vec::new());
             {
-                let mut ac = ArithmeticEncoder::<_, { TOTAL_CONTEXTS as usize }>::new(
-                    &mut buffer,
-                    &MQ_STATE_TABLE,
-                    TOTAL_CONTEXTS as usize,
-                    true,
-                )?;
-                self.sym_dict_encoder.encode(&mut ac, dictionary)?;
-                ac.flush(true)?;
+                let mut ac = ZEncoder::new(&mut buffer, true)?;
+                // Create context array for the arithmetic coder
+                let mut contexts = vec![0u8; TOTAL_CONTEXTS as usize];
+                self.sym_dict_encoder.encode(&mut ac, dictionary, &mut contexts)?;
+
             }
             buffer.into_inner()
         };
 
-        let mut result = Vec::new();
-        result.write_all(b"JB2D")?;
-        result.write_u24::<BigEndian>(chunk_data.len() as u32)?;
-        result.write_all(&chunk_data)?;
-
-        Ok(result)
+        // Don't add JB2D header - that's only for standalone .jb2 files
+        // For DjVu pages, the raw JB2 data goes directly into the stream
+        Ok(chunk_data)
     }
 
     /// Encodes and writes the Sjbz (page data) chunk.
-    fn encode_page_chunk(
+    pub fn encode_page_chunk(
         &mut self,
         components: &[ConnectedComponent],
     ) -> Result<Vec<u8>, Jb2Error> {
         let chunk_data = {
             let mut buffer = Cursor::new(Vec::new());
             {
-                let mut ac = ArithmeticEncoder::<_, { TOTAL_CONTEXTS as usize }>::new(
-                    &mut buffer,
-                    &MQ_STATE_TABLE,
-                    TOTAL_CONTEXTS as usize,
-                    true,
-                )?;
+                let mut ac = ZEncoder::new(&mut buffer, true)?;
                 let mut record_encoder = RecordStreamEncoder::new(
                     RECORD_STREAM_NC_BASE,
                     RECORD_STREAM_NC_CONTEXTS,
                     REFINEMENT_BITMAP_BASE,
                 );
+
+                // Create context array for the arithmetic coder
+                let mut contexts = vec![0u8; TOTAL_CONTEXTS as usize];
 
                 for component in components {
                     let sym_id = component.dict_symbol_index.unwrap_or(0);
@@ -140,19 +132,17 @@ impl<W: Write> JB2Encoder<W> {
                         component,
                         &self.dictionary,
                         is_refinement,
+                        &mut contexts,
                     )?;
                 }
 
-                ac.flush(true)?;
+
             }
             buffer.into_inner()
         };
 
-        let mut result = Vec::new();
-        result.write_all(b"Sjbz")?;
-        result.write_u24::<BigEndian>(chunk_data.len() as u32)?;
-        result.write_all(&chunk_data)?;
-
-        Ok(result)
+        // Don't add Sjbz header - that's handled by the page encoder
+        // Return raw JB2 data that will be BZZ-compressed
+        Ok(chunk_data)
     }
 }

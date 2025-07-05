@@ -25,6 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check for the --grayscale flag
     let use_grayscale = args.iter().any(|arg| arg == "--grayscale");
+    let decibels_str = find_arg_value("--decibels");
+    let decibels: Option<f32> = decibels_str.and_then(|s| s.parse().ok());
     let color_mode_str = if use_grayscale { "Grayscale" } else { "Color" };
 
     if !Path::new(image_path).exists() {
@@ -40,14 +42,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (width, height) = img.dimensions();
     println!("Loaded image with dimensions: {}x{}", width, height);
 
-    // Create page components for two pages.
+    // Create page components for one page (for comparison).
     println!("Building page components for page 1...");
     let page_components1 = PageComponents::new().with_background(img.clone())?;
-    println!("Building page components for page 2...");
-    let page_components2 = PageComponents::new().with_background(img)?;
 
     // Create a document encoder and set color mode based on the flag.
     let mut doc_encoder = DocumentEncoder::new();
+
+    if let Some(db) = decibels {
+        doc_encoder = doc_encoder.with_decibels(db);
+        println!("Encoding with target decibels: {}", db);
+    }
+
     if use_grayscale {
         doc_encoder = doc_encoder.with_color(false);
         println!("Encoding in grayscale mode.");
@@ -55,14 +61,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Encoding in color mode (default). Use --grayscale to disable.");
     }
 
-    // Add the page components to the document. The encoder will handle the actual encoding.
+    // Add just one page to compare with working format
     println!("Adding page 1 to document...");
     doc_encoder.add_page(page_components1)?;
     println!("Page 1 added successfully.");
-
-    println!("Adding page 2 to document...");
-    doc_encoder.add_page(page_components2)?;
-    println!("Page 2 added successfully.");
 
     // Save the document
     let file = File::create(output_path)?;
@@ -72,7 +74,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     doc_encoder.write_to(&mut writer)?;
 
     println!("\n✅ Successfully created DjVu document: {}", output_path);
-    println!("   File size: {} bytes", std::fs::metadata(output_path)?.len());
+    println!(
+        "   File size: {} bytes",
+        std::fs::metadata(output_path)?.len()
+    );
     println!("   Pages: {}", doc_encoder.page_count());
     println!("   Source Image: {}", image_path);
     println!("   Image Dimensions: {}x{}", width, height);
@@ -80,4 +85,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

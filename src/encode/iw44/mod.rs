@@ -12,6 +12,8 @@ pub mod encoder;
 pub mod masking;
 pub mod transform;
 pub mod zigzag;
+#[cfg(test)]
+mod tests;
 
 // Re-export commonly used types and functions
 pub use codec::*;

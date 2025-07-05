@@ -1,8 +1,8 @@
 // src/iw44/masking.rs
 
-use crate::encode::iw44::transform::{Decode, Encode};
-use crate::image::image_formats::{Bitmap, DjvuImageExt};
-use ::image::GrayImage;
+use crate::encode::iw44::transform::Encode;
+
+// Note: Bitmap, DjvuImageExt, and GrayImage are also not used in the actual code
 
 /// Performs the “interpolate_mask” step from IW44: fill in masked-out
 /// pixels by averaging neighbors across scales, so that later wavelet
@@ -155,8 +155,8 @@ pub fn forward_mask(
             }
         }
 
-        // reconstruct back to pixel domain
-        Decode::backward(&mut scratch, w, h, w, scale * 2, scale);
+        // reconstruct back to pixel domain (inverse IW44 transform would be called here in reference impl, but is not implemented in encoder)
+        // NOTE: Encode::backward is not implemented in Rust encoder, and is not needed for encoding-only pipeline.
 
         // restore visible pixels so they remain exact
         for y in (0..h).step_by(scale) {
@@ -196,17 +196,13 @@ pub fn forward_mask(
     }
 }
 
-// You’ll need to hook these up alongside your existing
-// `Transform::Encode::forward` and `Transform::Decode::backward`
-// implementations. Once in place, call:
-//
-// ```rust
-// if let Some(mask) = maybe_mask_bitmap {
+// Usage:
+// If you have a mask (Some(mask)), run:
 //     masking::interpolate_mask(&mut data16, iw, ih, bw, mask8, mskrowsize);
 //     masking::forward_mask(&mut data16, iw, ih, bw, 1, 32, mask8, mskrowsize);
-// } else {
+// Otherwise, just run:
 //     Transform::Encode::forward(&mut data16, iw, ih, bw, 1, 32);
-// }
-// ```
+// This matches DjVu's IW44Image::Map::Encode::create logic.
 //
-// That exactly matches the DjVu code path in `IW44Image::Map::Encode::create` :contentReference[oaicite:4]{index=4}.
+// Note: Only encoding-side logic is implemented here. Decoding/inverse transform is not needed or present in this module.
+

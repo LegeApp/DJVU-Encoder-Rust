@@ -1,76 +1,164 @@
-// src/iw44/encoder.rs
-//! Production-ready IW44 encoder: chunked ZP coding with automatic headers,
-//! slice/byte/decibel stopping, and optional chroma handling.
+// src/encode/iw44/encoder.rs
 
 use super::codec::Codec;
 use super::coeff_map::CoeffMap;
-use super::constants::DECIBEL_PRUNE;
 use super::transform;
-use crate::encode::zp::ZpEncoder;
+use crate::encode::zc::ZEncoder;
 use ::image::{GrayImage, RgbImage};
-use std::io::Cursor;
+use bytemuck;
+use std::io::{Cursor, Write};
+use std::sync::OnceLock;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum EncoderError {
-    #[error("At least one stop condition (slices, bytes, or decibels) must be set.")]
+    #[error("At least one stop condition must be set")]
     NeedStopCondition,
-    #[error("Input image is empty or invalid.")]
+    #[error("Input image is empty or invalid")]
     EmptyObject,
     #[error("ZP codec error: {0}")]
-    ZpCodec(#[from] crate::encode::zp::ZpCodecError),
+    ZCodec(#[from] crate::encode::zc::ZCodecError),
+    #[error("General error: {0}")]
+    General(#[from] crate::utils::error::DjvuError),
 }
 
-/// Chrominance mode for IW44 encoding.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum CrcbMode {
     #[default]
-    None, // Y only
-    Half,   // chroma at half resolution
-    Normal, // full resolution with delay
-    Full,   // full resolution, no delay
+    None,
+    Half,
+    Normal,
+    Full,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct EncoderParams {
-    pub slices: Option<usize>,     // maximum number of wavelet slices
-    pub bytes: Option<usize>,      // maximum total bytes (including headers)
-    pub decibels: Option<f32>,     // target SNR in dB
-    pub crcb_mode: CrcbMode,       // chroma handling
-    pub db_frac: f32,              // decibel update fraction
-    pub max_slices: Option<usize>, // absolute maximum slices to prevent infinite loops
+    pub decibels: Option<f32>,
+    pub crcb_mode: CrcbMode,
+    pub db_frac: f32,
 }
 
 impl Default for EncoderParams {
     fn default() -> Self {
         Self {
-            slices: None,
-            bytes: None,
             decibels: None,
-            crcb_mode: CrcbMode::default(),
-            db_frac: 0.9,
-            max_slices: Some(1000), // Safety limit for infinite loop prevention
+            crcb_mode: CrcbMode::Full,
+            db_frac: 0.35,
         }
     }
 }
+// (1) helper to go from signed i8 → unbiased u8
+#[inline]
+fn signed_to_unsigned_u8(v: i8) -> u8 { (v as i16 + 128) as u8 }
 
-/// IW44 encoder that emits complete BM44/PM44 chunks with headers.
+fn convert_signed_buffer_to_grayscale(buf: &[i8], w: u32, h: u32) -> GrayImage {
+    let bytes: Vec<u8> = buf.iter().map(|&v| signed_to_unsigned_u8(v)).collect();
+    GrayImage::from_raw(w, h, bytes).expect("Invalid buffer dimensions")
+}
+
+// Fixed-point constants for YCbCr conversion (Rec.601)
+const SCALE: i32 = 1 << 16;
+const ROUND: i32 = 1 << 15;
+
+// Pre-computed YCbCr conversion tables (computed once)
+static YCC_TABLES: OnceLock<([[i32; 256]; 3], [[i32; 256]; 3], [[i32; 256]; 3])> = OnceLock::new();
+
+fn get_ycc_tables() -> &'static ([[i32; 256]; 3], [[i32; 256]; 3], [[i32; 256]; 3]) {
+    YCC_TABLES.get_or_init(|| {
+        let mut y_table = [[0i32; 256]; 3];   // [R, G, B] components for Y
+        let mut cb_table = [[0i32; 256]; 3];  // [R, G, B] components for Cb
+        let mut cr_table = [[0i32; 256]; 3];  // [R, G, B] components for Cr
+        
+        for i in 0..256 {
+            let v = i as i32;
+            
+            // Y coefficients (no offset, full 0-255 range)
+            y_table[0][i] = (19595 * v) >> 16;  // 0.299 * 65536
+            y_table[1][i] = (38469 * v) >> 16;  // 0.587 * 65536  
+            y_table[2][i] = (7471 * v) >> 16;   // 0.114 * 65536
+            
+            // Cb coefficients (centered on 128)
+            cb_table[0][i] = ((-11059 * v) >> 16) + 128;  // -0.168736 * 65536
+            cb_table[1][i] = ((-21709 * v) >> 16) + 128;  // -0.331264 * 65536
+            cb_table[2][i] = ((32768 * v) >> 16) + 128;   //  0.500000 * 65536
+            
+            // Cr coefficients (centered on 128)
+            cr_table[0][i] = ((32768 * v) >> 16) + 128;   //  0.500000 * 65536
+            cr_table[1][i] = ((-27439 * v) >> 16) + 128;  // -0.418688 * 65536
+            cr_table[2][i] = ((-5329 * v) >> 16) + 128;   // -0.081312 * 65536
+        }
+        
+        (y_table, cb_table, cr_table)
+    })
+}
+
+/// Optimized RGB → YCbCr conversion with pre-computed tables.
+/// Y channel: 0-255 range mapped to signed i8: -128 to +127 (0→-128, 255→+127)
+/// Cb/Cr channels: centered on 0 (stored as signed i8: -128 to +127)
+pub fn rgb_to_ycbcr_buffers(
+    img: &RgbImage,
+    out_y:  &mut [i8],
+    out_cb: &mut [i8],
+    out_cr: &mut [i8],
+) {
+    let (y_table, cb_table, cr_table) = get_ycc_tables();
+    let pixels: &[[u8;3]] = bytemuck::cast_slice(img.as_raw());
+
+    assert_eq!(out_y.len(), pixels.len());
+    assert_eq!(out_cb.len(), pixels.len());
+    assert_eq!(out_cr.len(), pixels.len());
+
+    // Debug sample to check conversion
+    let sample_indices = [0, pixels.len() / 4, pixels.len() / 2, 3 * pixels.len() / 4, pixels.len() - 1];
+    let mut y_samples = Vec::new();
+    let mut cb_samples = Vec::new();
+    let mut cr_samples = Vec::new();
+
+    for (i, &[r, g, b]) in pixels.iter().enumerate() {
+        // Y: full 0-255 range, no centering
+        let y = y_table[0][r as usize] + y_table[1][g as usize] + y_table[2][b as usize];
+        let y_val = y.clamp(0, 255);
+        // Store Y as signed but preserve full 0-255 range by subtracting 128
+        // This maps 0-255 to -128-127, which is the expected format for IW44
+        out_y[i] = (y_val - 128) as i8;
+        
+        // Cb/Cr: centered on 128, then subtract 128 to get signed range
+        let cb = cb_table[0][r as usize] + cb_table[1][g as usize] + cb_table[2][b as usize];
+        let cr = cr_table[0][r as usize] + cr_table[1][g as usize] + cr_table[2][b as usize];
+        
+        out_cb[i] = (cb - 128).clamp(i8::MIN as i32, i8::MAX as i32) as i8;
+        out_cr[i] = (cr - 128).clamp(i8::MIN as i32, i8::MAX as i32) as i8;
+        
+        // Collect samples for debugging
+        if sample_indices.contains(&i) {
+            y_samples.push((r, g, b, y_val, out_y[i]));
+            cb_samples.push(out_cb[i]);
+            cr_samples.push(out_cr[i]);
+        }
+    }
+    
+    // Print debug info for YCbCr conversion
+    println!("YCbCr conversion samples (RGB → Y_uint8 → Y_i8):");
+    for (idx, &sample_i) in sample_indices.iter().enumerate() {
+        if idx < y_samples.len() {
+            let (r, g, b, y_uint, y_i8) = y_samples[idx];
+            println!("  Pixel {}: RGB({},{},{}) → Y_uint={} → Y_i8={}, Cb={}, Cr={}", 
+                     sample_i, r, g, b, y_uint, y_i8, cb_samples[idx], cr_samples[idx]);
+        }
+    }
+}
 pub struct IWEncoder {
     y_codec: Codec,
     cb_codec: Option<Codec>,
     cr_codec: Option<Codec>,
     params: EncoderParams,
-    // running state
     total_slices: usize,
     total_bytes: usize,
     serial: u8,
-    // Shared band/bit state for synchronization
-    cur_band: usize,
-    cur_bit: i32,
+    cur_bit: i32, // Synchronized bit-plane index
 }
 
 impl IWEncoder {
-    /// Create from a grayscale image (with optional mask).
     pub fn from_gray(
         img: &GrayImage,
         mask: Option<&GrayImage>,
@@ -78,6 +166,7 @@ impl IWEncoder {
     ) -> Result<Self, EncoderError> {
         let ymap = CoeffMap::create_from_image(img, mask);
         let y_codec = Codec::new(ymap);
+        let cur_bit = y_codec.cur_bit;
 
         Ok(IWEncoder {
             y_codec,
@@ -87,12 +176,10 @@ impl IWEncoder {
             total_slices: 0,
             total_bytes: 0,
             serial: 0,
-            cur_band: 0,
-            cur_bit: 13, // Start from high bit-plane
+            cur_bit,
         })
     }
 
-    /// Create from an RGB image (with optional binary mask) and parameters.
     pub fn from_rgb(
         img: &RgbImage,
         mask: Option<&GrayImage>,
@@ -105,17 +192,42 @@ impl IWEncoder {
             CrcbMode::Full => (0, false),
         };
 
-        // Y channel
-        let yplane = transform::rgb_to_y(img);
-        let ymap = CoeffMap::create_from_image(&yplane, mask);
+        let (width, height) = img.dimensions();
+        let num_pixels = (width * height) as usize;
+        
+        // Convert RGB to YCbCr using the corrected function
+        let mut y_buf = vec![0i8; num_pixels];
+        let mut cb_buf = vec![0i8; num_pixels];
+        let mut cr_buf = vec![0i8; num_pixels];
+        rgb_to_ycbcr_buffers(img, &mut y_buf, &mut cb_buf, &mut cr_buf);
+
+        // Convert Y channel to GrayImage (signed i8 -> unsigned u8)
+        let y_plane = GrayImage::from_raw(
+            width,
+            height,
+            y_buf.iter().map(|&v| (v as i32 + 128) as u8).collect(),
+        ).unwrap();
+        
+        let ymap = CoeffMap::create_from_image(&y_plane, mask);
         let y_codec = Codec::new(ymap);
 
-        // Cb/Cr channels if enabled
         let (cb_codec, cr_codec) = if delay >= 0 {
-            let cbplane = transform::rgb_to_cb(img);
-            let crplane = transform::rgb_to_cr(img);
-            let mut cbmap = CoeffMap::create_from_image(&cbplane, mask);
-            let mut crmap = CoeffMap::create_from_image(&crplane, mask);
+            // Convert Cb/Cr channels to GrayImage (signed i8 -> unsigned u8)
+            let cb_plane = GrayImage::from_raw(
+                width,
+                height,
+                cb_buf.iter().map(|&v| (v as i32 + 128) as u8).collect(),
+            ).unwrap();
+            
+            let cr_plane = GrayImage::from_raw(
+                width,
+                height,
+                cr_buf.iter().map(|&v| (v as i32 + 128) as u8).collect(),
+            ).unwrap();
+
+            let mut cbmap = CoeffMap::create_from_image(&cb_plane, mask);
+            let mut crmap = CoeffMap::create_from_image(&cr_plane, mask);
+
             if half {
                 cbmap.slash_res(2);
                 crmap.slash_res(2);
@@ -125,6 +237,8 @@ impl IWEncoder {
             (None, None)
         };
 
+        let cur_bit = y_codec.cur_bit;
+
         Ok(IWEncoder {
             y_codec,
             cb_codec,
@@ -133,23 +247,11 @@ impl IWEncoder {
             total_slices: 0,
             total_bytes: 0,
             serial: 0,
-            cur_band: 0,
-            cur_bit: 13, // Start from high bit-plane
+            cur_bit,
         })
     }
 
-    /// Encode one slice of data and return the IW44 stream + whether more slices remain.
-    /// This should be called repeatedly until `more` is false.
-    pub fn encode_chunk(&mut self) -> Result<(Vec<u8>, bool), EncoderError> {
-        // require at least one stopping condition
-        if self.params.slices.is_none()
-            && self.params.bytes.is_none()
-            && self.params.decibels.is_none()
-        {
-            return Err(EncoderError::NeedStopCondition);
-        }
-
-        // check image non-empty
+    pub fn encode_chunk(&mut self, max_slices: usize) -> Result<(Vec<u8>, bool), EncoderError> {
         let (w, h) = {
             let map = &self.y_codec.map;
             let w = map.width();
@@ -160,178 +262,106 @@ impl IWEncoder {
             (w, h)
         };
 
-        // Check if we should stop before encoding this slice
         if self.cur_bit < 0 {
-            return Ok((Vec::new(), false)); // finished all bit-planes
+            return Ok((Vec::new(), false));
         }
 
-        // decibel stop
-        if let Some(db_target) = self.params.decibels {
-            let est_db = self.y_codec.estimate_decibel(self.params.db_frac);
-            if est_db >= db_target {
-                return Ok((Vec::new(), false));
-            }
-        }
-        // byte stop (approximate: exclude header size)
-        if let Some(byte_target) = self.params.bytes {
-            if self.total_bytes >= byte_target {
-                return Ok((Vec::new(), false));
-            }
-        }
-        // slice count stop
-        if let Some(slice_target) = self.params.slices {
-            if self.total_slices >= slice_target {
-                return Ok((Vec::new(), false));
-            }
-        }
+        let mut chunk_data = Vec::new();
+        let mut slice_count = 0u8;
+        let mut zp = ZEncoder::new(Cursor::new(Vec::new()), true)?;
 
-        // Synchronize all codecs to current band/bit
-        self.y_codec.cur_band = self.cur_band;
+        // Synchronize bit-planes across components
         self.y_codec.cur_bit = self.cur_bit;
         if let Some(ref mut cb) = self.cb_codec {
-            cb.cur_band = self.cur_band;
             cb.cur_bit = self.cur_bit;
         }
         if let Some(ref mut cr) = self.cr_codec {
-            cr.cur_band = self.cur_band;
             cr.cur_bit = self.cur_bit;
         }
 
-        // setup arithmetic coder for this slice
-        let mut zp: ZpEncoder<Cursor<Vec<u8>>> = ZpEncoder::new(Cursor::new(Vec::new()), true)?;
-        let mut more = true;
-        let mut actual_slice_count = 1; // Always encode Y
-
-        // Sync all codec states with the encoder's current state BEFORE encoding
-        self.y_codec.cur_band = self.cur_band;
-        self.y_codec.cur_bit = self.cur_bit;
+        let mut slices_encoded = 0;
         
-        if let Some(ref mut cb) = self.cb_codec {
-            cb.cur_band = self.cur_band;
-            cb.cur_bit = self.cur_bit;
-        }
-        if let Some(ref mut cr) = self.cr_codec {
-            cr.cur_band = self.cur_band;
-            cr.cur_bit = self.cur_bit;
-        }
-
-        // encode Y slice
-        more = self.y_codec.encode_slice(&mut zp)?;
-
-        // encode Cb/Cr slice if present (with delay logic)
-        if let (Some(ref mut cb), Some(ref mut cr)) =
-            (self.cb_codec.as_mut(), self.cr_codec.as_mut())
-        {
-            // Simple delay: only encode chroma after a few Y slices
-            let crcb_delay = 10; // Delay chroma by 10 slices
-            if self.total_slices >= crcb_delay {
-                more |= cb.encode_slice(&mut zp)?;
-                more |= cr.encode_slice(&mut zp)?;
-                actual_slice_count = 3; // Y + Cb + Cr were encoded
+        // Encode up to max_slices
+        while slices_encoded < max_slices && self.cur_bit >= 0 {
+            let y_has_data = self.y_codec.encode_slice(&mut zp)?;
+            
+            // Debug: Log slice encoding status
+            if slices_encoded % 50 == 0 || !y_has_data {
+                println!("Slice {}: bit={}, band={}, y_has_data={}", 
+                         self.total_slices, self.cur_bit, self.y_codec.cur_band, y_has_data);
+            }
+            
+            // Always count Y slice
+            slices_encoded += 1;
+            
+            // Handle chrominance delay for Cb/Cr components
+            let mut cb_cr_encoded = false;
+            if let (Some(ref mut cb), Some(ref mut cr)) = (&mut self.cb_codec, &mut self.cr_codec) {
+                let crcb_delay = match self.params.crcb_mode {
+                    CrcbMode::Half | CrcbMode::Normal => 10,
+                    _ => 0,
+                };
+                
+                if self.total_slices >= crcb_delay {
+                    cb.encode_slice(&mut zp)?;
+                    cr.encode_slice(&mut zp)?;
+                    cb_cr_encoded = true;
+                }
+            }
+            
+            // Update total slice count and synchronize state
+            self.total_slices += 1;
+            
+            // Synchronize cur_bit from Y codec (it manages band progression)
+            self.cur_bit = self.y_codec.cur_bit;
+            
+            // Sync chrominance codecs if they exist
+            if let Some(ref mut cb) = self.cb_codec {
+                cb.cur_bit = self.cur_bit;
+            }
+            if let Some(ref mut cr) = self.cr_codec {
+                cr.cur_bit = self.cur_bit;
+            }
+            
+            // Calculate actual slice count for the chunk header
+            if cb_cr_encoded {
+                slice_count += 3; // Y + Cb + Cr
+            } else {
+                slice_count += 1; // Just Y
+            }
+            
+            // Break if we've exhausted all bit-planes
+            if self.cur_bit < 0 {
+                break;
             }
         }
 
-        self.total_slices += 1;
-
-        // Advance to next band/bit-plane (synchronized across all codecs)
-        // Note: Don't call finish_slice() on codecs as that advances their state
-        self.advance_band_bit();
-
-        // Safety check to prevent infinite loops
-        let max_slices = self.params.max_slices.unwrap_or(10_000);
-        if self.total_slices > max_slices {
-            eprintln!("Warning: Slice cap {} reached, aborting", max_slices);
-            more = false;
-        }
-
-        // finish arithmetic payload
-        let payload = zp.finish()?.into_inner();
-        let payload_len = payload.len();
-
-        // Calculate slice count for this chunk based on what was actually encoded
-        let slice_count = actual_slice_count;
-
-        // The encoder's job is to produce ONLY the raw IW44 stream (secondary header + payload).
-        // The caller is responsible for wrapping this in the appropriate IFF chunk (BG44/FG44/PM44/etc.)
-        let is_pm44 = self.cb_codec.is_some();
-        let mut iw44_stream = Vec::with_capacity(payload_len + 9);
-
-        // Write data header as specified in the DjVu spec
-        iw44_stream.push(self.serial);
-        iw44_stream.push(slice_count as u8);
+        // Write chunk header
+        chunk_data.push(self.serial);
+        chunk_data.push(slice_count);
 
         if self.serial == 0 {
+            let is_pm44 = self.cb_codec.is_some();
             let color_bit = if is_pm44 { 0 } else { 1 };
-            let major = (color_bit << 7) | 1; // major version 1
-            iw44_stream.push(major);
-            iw44_stream.push(2); // minor version
-            iw44_stream.extend_from_slice(&(w as u16).to_be_bytes());
-            iw44_stream.extend_from_slice(&(h as u16).to_be_bytes());
+            let major = (color_bit << 7) | 1;
+            chunk_data.push(major);
+            chunk_data.push(2); // Minor version
+            chunk_data.extend_from_slice(&(w as u16).to_be_bytes());
+            chunk_data.extend_from_slice(&(h as u16).to_be_bytes());
 
             let delay = match self.params.crcb_mode {
                 CrcbMode::Half | CrcbMode::Normal => 10,
                 _ => 0,
             } as u8;
-            iw44_stream.push(0x80 | (delay & 0x7F));
+            chunk_data.push(0x80 | (delay & 0x7F));
         }
 
-        iw44_stream.extend_from_slice(&payload);
+        let zp_data = zp.finish()?.into_inner();
+        chunk_data.extend_from_slice(&zp_data);
+
         self.serial = self.serial.wrapping_add(1);
+        self.total_bytes += chunk_data.len();
 
-        self.total_bytes += iw44_stream.len();
-
-        // Return whether more slices are available
-        Ok((iw44_stream, self.cur_bit >= 0))
-    }
-
-    /// Advance to the next band/bit-plane in a synchronized manner
-    fn advance_band_bit(&mut self) {
-        println!(
-            "DEBUG: Before advance: band={}, bit={}",
-            self.cur_band, self.cur_bit
-        );
-        self.cur_band += 1;
-        if self.cur_band >= super::constants::BAND_BUCKETS.len() {
-            self.cur_band = 0;
-            self.cur_bit -= 1;
-            println!(
-                "DEBUG: Advanced to new bit-plane: band={}, bit={}",
-                self.cur_band, self.cur_bit
-            );
-
-            // Only update quantization thresholds if we're still encoding
-            if self.cur_bit >= 0 {
-                // Reduce quantization thresholds for next bit-plane (use √2 decay)
-                for q in self.y_codec.quant_hi.iter_mut() {
-                    *q = (*q as f32 / 1.414) as i32;
-                }
-                for q in self.y_codec.quant_lo.iter_mut() {
-                    *q = (*q as f32 / 1.414) as i32;
-                }
-
-                // Sync chroma codecs if present
-                if let Some(ref mut cb) = self.cb_codec {
-                    for q in cb.quant_hi.iter_mut() {
-                        *q = (*q as f32 / 1.414) as i32;
-                    }
-                    for q in cb.quant_lo.iter_mut() {
-                        *q = (*q as f32 / 1.414) as i32;
-                    }
-                }
-                if let Some(ref mut cr) = self.cr_codec {
-                    for q in cr.quant_hi.iter_mut() {
-                        *q = (*q as f32 / 1.414) as i32;
-                    }
-                    for q in cr.quant_lo.iter_mut() {
-                        *q = (*q as f32 / 1.414) as i32;
-                    }
-                }
-            }
-        } else {
-            println!(
-                "DEBUG: Advanced to next band: band={}, bit={}",
-                self.cur_band, self.cur_bit
-            );
-        }
+        Ok((chunk_data, self.cur_bit >= 0))
     }
 }

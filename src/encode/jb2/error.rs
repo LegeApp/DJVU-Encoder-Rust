@@ -1,5 +1,5 @@
 // src/jb2/error.rs
-use crate::arithmetic_coder::ArithmeticError;
+use crate::encode::zc::ZCodecError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -7,8 +7,8 @@ pub enum Jb2Error {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Arithmetic coder error: {0:?}")]
-    Arithmetic(#[from] ArithmeticError),
+    #[error("Z codec error: {0:?}")]
+    ZCodec(#[from] ZCodecError),
 
     #[error("Invalid number encountered during encoding: {0}")]
     InvalidNumber(String),

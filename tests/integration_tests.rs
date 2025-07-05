@@ -10,7 +10,7 @@ use tempfile::tempdir;
 fn test_encode_decode_roundtrip() {
     // Create a simple test image
     let mut img = RgbImage::new(100, 100);
-    
+
     // Fill with a simple pattern
     for y in 0..100 {
         for x in 0..100 {
@@ -20,35 +20,43 @@ fn test_encode_decode_roundtrip() {
             img.put_pixel(x, y, image::Rgb([r, g, b]));
         }
     }
-    
+
     // Create a document with the test image
     let mut encoder = DocumentEncoder::new();
     let page_components = PageComponents::new()
         .with_background(img)
         .expect("Failed to create page components");
-    
-    encoder.add_page(page_components).expect("Failed to add page");
-    
+
+    encoder
+        .add_page(page_components)
+        .expect("Failed to add page");
+
     // Encode to bytes
     let mut encoded_data = Vec::new();
-    encoder.write_to(&mut encoded_data).expect("Failed to encode document");
-    
+    encoder
+        .write_to(&mut encoded_data)
+        .expect("Failed to encode document");
+
     // Verify we have some data
     assert!(!encoded_data.is_empty(), "Encoded data should not be empty");
-    assert!(encoded_data.len() > 100, "Encoded data should be substantial");
-    
+    assert!(
+        encoded_data.len() > 100,
+        "Encoded data should be substantial"
+    );
+
     // Write to temporary file
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let djvu_path = temp_dir.path().join("test.djvu");
-    
+
     {
         let mut file = File::create(&djvu_path).expect("Failed to create djvu file");
-        file.write_all(&encoded_data).expect("Failed to write djvu file");
+        file.write_all(&encoded_data)
+            .expect("Failed to write djvu file");
     }
-    
+
     // Test with ddjvu.exe if available
     test_with_ddjvu(&djvu_path);
-    
+
     // Basic format validation
     validate_djvu_format(&encoded_data);
 }
@@ -57,20 +65,24 @@ fn test_with_ddjvu(djvu_path: &std::path::Path) {
     let ddjvu_path = "ddjvu.exe";
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let output_path = temp_dir.path().join("decoded.ppm");
-    
+
     // Try to decode with ddjvu.exe
     let result = Command::new(ddjvu_path)
         .arg("-format=ppm")
         .arg(djvu_path)
         .arg(&output_path)
         .output();
-    
+
     match result {
         Ok(output) => {
             if output.status.success() {
                 // Check if output file was created
-                assert!(output_path.exists(), "ddjvu.exe should have created output file");
-                let metadata = std::fs::metadata(&output_path).expect("Failed to get output file metadata");
+                assert!(
+                    output_path.exists(),
+                    "ddjvu.exe should have created output file"
+                );
+                let metadata =
+                    std::fs::metadata(&output_path).expect("Failed to get output file metadata");
                 assert!(metadata.len() > 0, "Output file should not be empty");
                 println!("✅ ddjvu.exe successfully decoded the file");
             } else {
@@ -89,13 +101,13 @@ fn test_with_ddjvu(djvu_path: &std::path::Path) {
 fn validate_djvu_format(data: &[u8]) {
     // Basic DjVu format validation
     assert!(data.len() >= 12, "DjVu file must be at least 12 bytes");
-    
+
     // Check for AT&T magic number
     assert_eq!(&data[0..4], b"AT&T", "Should start with AT&T magic");
-    
+
     // Check for FORM
     assert_eq!(&data[4..8], b"FORM", "Should have FORM chunk");
-    
+
     // Check for DJVM or DJVU type
     let chunk_type = &data[12..16];
     assert!(
@@ -103,7 +115,7 @@ fn validate_djvu_format(data: &[u8]) {
         "Should be DJVM (multi-page) or DJVU (single-page), got: {:?}",
         std::str::from_utf8(chunk_type).unwrap_or("invalid")
     );
-    
+
     println!("✅ DjVu format validation passed");
 }
 
@@ -111,71 +123,86 @@ fn validate_djvu_format(data: &[u8]) {
 fn test_small_image_encoding() {
     // Test with a very small image to ensure minimal case works
     let img = RgbImage::new(10, 10);
-    
+
     let mut encoder = DocumentEncoder::new();
     let page_components = PageComponents::new()
         .with_background(img)
         .expect("Failed to create page components");
-    
-    encoder.add_page(page_components).expect("Failed to add page");
-    
+
+    encoder
+        .add_page(page_components)
+        .expect("Failed to add page");
+
     let mut encoded_data = Vec::new();
-    encoder.write_to(&mut encoded_data).expect("Failed to encode document");
-    
+    encoder
+        .write_to(&mut encoded_data)
+        .expect("Failed to encode document");
+
     validate_djvu_format(&encoded_data);
-    
+
     // Ensure size is reasonable for a 10x10 image
-    assert!(encoded_data.len() < 10000, "10x10 image should not produce huge files");
+    assert!(
+        encoded_data.len() < 10000,
+        "10x10 image should not produce huge files"
+    );
 }
 
 #[test]
 fn test_multipage_encoding() {
     // Test encoding multiple pages
     let mut encoder = DocumentEncoder::new();
-    
+
     // Add 3 different pages
     for i in 0..3 {
         let mut img = RgbImage::new(50, 50);
-        
+
         // Fill each page with a different color
         let color = match i {
-            0 => [255, 0, 0],   // Red
-            1 => [0, 255, 0],   // Green
-            _ => [0, 0, 255],   // Blue
+            0 => [255, 0, 0], // Red
+            1 => [0, 255, 0], // Green
+            _ => [0, 0, 255], // Blue
         };
-        
+
         for pixel in img.pixels_mut() {
             *pixel = image::Rgb(color);
         }
-        
+
         let page_components = PageComponents::new()
             .with_background(img)
             .expect("Failed to create page components");
-        
-        encoder.add_page(page_components).expect("Failed to add page");
+
+        encoder
+            .add_page(page_components)
+            .expect("Failed to add page");
     }
-    
+
     let mut encoded_data = Vec::new();
-    encoder.write_to(&mut encoded_data).expect("Failed to encode document");
-    
+    encoder
+        .write_to(&mut encoded_data)
+        .expect("Failed to encode document");
+
     validate_djvu_format(&encoded_data);
-    
+
     // Should be DJVM for multi-page
-    assert_eq!(&encoded_data[12..16], b"DJVM", "Multi-page should be DJVM format");
+    assert_eq!(
+        &encoded_data[12..16],
+        b"DJVM",
+        "Multi-page should be DJVM format"
+    );
 }
 
 #[test]
 fn test_comprehensive_four_page_roundtrip() {
     // Create document encoder
     let mut encoder = DocumentEncoder::new();
-    
+
     // Page 1: Blank page
     let blank_img = RgbImage::from_pixel(200, 300, image::Rgb([255, 255, 255]));
     let page1 = PageComponents::new()
         .with_background(blank_img)
         .expect("Failed to create blank page");
     encoder.add_page(page1).expect("Failed to add blank page");
-    
+
     // Page 2: JB2 encoded page (bilevel-like image)
     let mut jb2_img = RgbImage::new(200, 300);
     for y in 50..250 {
@@ -191,7 +218,7 @@ fn test_comprehensive_four_page_roundtrip() {
         .with_background(jb2_img)
         .expect("Failed to create JB2 page");
     encoder.add_page(page2).expect("Failed to add JB2 page");
-    
+
     // Page 3: IW44 encoded page (color gradients)
     let mut iw44_img = RgbImage::new(200, 300);
     for y in 0..300 {
@@ -206,31 +233,39 @@ fn test_comprehensive_four_page_roundtrip() {
         .with_background(iw44_img)
         .expect("Failed to create IW44 page");
     encoder.add_page(page3).expect("Failed to add IW44 page");
-    
+
     // Page 4: Final blank page
     let blank_img2 = RgbImage::from_pixel(200, 300, image::Rgb([240, 240, 240]));
     let page4 = PageComponents::new()
         .with_background(blank_img2)
         .expect("Failed to create final blank page");
-    encoder.add_page(page4).expect("Failed to add final blank page");
-    
+    encoder
+        .add_page(page4)
+        .expect("Failed to add final blank page");
+
     // Encode the complete document
     let mut encoded_data = Vec::new();
-    encoder.write_to(&mut encoded_data).expect("Failed to encode 4-page document");
-    
+    encoder
+        .write_to(&mut encoded_data)
+        .expect("Failed to encode 4-page document");
+
     // Basic validation
     assert!(!encoded_data.is_empty(), "Encoded data should not be empty");
-    assert!(encoded_data.len() > 300, "4-page document should be substantial");
+    assert!(
+        encoded_data.len() > 300,
+        "4-page document should be substantial"
+    );
     validate_multipage_djvu_format(&encoded_data);
-    
+
     // Write to file for external validation
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let djvu_path = temp_dir.path().join("test_4pages.djvu");
     {
         let mut file = File::create(&djvu_path).expect("Failed to create djvu file");
-        file.write_all(&encoded_data).expect("Failed to write djvu file");
+        file.write_all(&encoded_data)
+            .expect("Failed to write djvu file");
     }
-    
+
     // Test with ddjvu.exe if available
     test_multipage_with_ddjvu(&djvu_path);
 }
@@ -240,21 +275,27 @@ fn validate_multipage_djvu_format(data: &[u8]) {
     assert!(data.len() >= 12, "DjVu file must be at least 12 bytes");
     assert_eq!(&data[0..4], b"AT&T", "Should start with AT&T magic");
     assert_eq!(&data[4..8], b"FORM", "Should have FORM chunk");
-    assert_eq!(&data[12..16], b"DJVM", "Multi-page document should be DJVM format");
-    
+    assert_eq!(
+        &data[12..16],
+        b"DJVM",
+        "Multi-page document should be DJVM format"
+    );
+
     // Count pages
     let data_slice = &data[16..];
     let mut pos = 0;
     let mut page_count = 0;
     let mut found_dirm = false;
-    
+
     while pos + 8 <= data_slice.len() {
         let chunk_id = &data_slice[pos..pos + 4];
         let chunk_size = u32::from_be_bytes([
-            data_slice[pos + 4], data_slice[pos + 5],
-            data_slice[pos + 6], data_slice[pos + 7],
+            data_slice[pos + 4],
+            data_slice[pos + 5],
+            data_slice[pos + 6],
+            data_slice[pos + 7],
         ]) as usize;
-        
+
         match chunk_id {
             b"DIRM" => found_dirm = true,
             b"FORM" => {
@@ -264,11 +305,13 @@ fn validate_multipage_djvu_format(data: &[u8]) {
             }
             _ => {}
         }
-        
+
         pos += 8 + chunk_size;
-        if pos % 2 == 1 { pos += 1; }
+        if pos % 2 == 1 {
+            pos += 1;
+        }
     }
-    
+
     assert!(found_dirm, "Multi-page DjVu should contain DIRM chunk");
     assert_eq!(page_count, 4, "Should find exactly 4 pages");
 }
@@ -280,7 +323,7 @@ fn test_multipage_with_ddjvu(djvu_path: &std::path::Path) {
         .arg(djvu_path)
         .arg("nul") // Discard output on Windows
         .output();
-    
+
     match result {
         Ok(output) => {
             if output.status.success() {
@@ -327,14 +370,16 @@ fn test_comprehensive_four_page_roundtrip_with_test_files() {
             color_image
         }
     };
-    
+
     // Create 4-page document
     let mut encoder = DocumentEncoder::new();
-    
+
     // Page 1: Blank
-    encoder.add_page(PageComponents::new()).expect("Failed to add blank page");
-    
-    // Page 2: JB2 page  
+    encoder
+        .add_page(PageComponents::new())
+        .expect("Failed to add blank page");
+
+    // Page 2: JB2 page
     let jb2_page = PageComponents::new()
         .with_foreground(jb2_image)
         .expect("Failed to create JB2 page");
@@ -344,26 +389,33 @@ fn test_comprehensive_four_page_roundtrip_with_test_files() {
     let iw44_page = PageComponents::new()
         .with_background(iw44_image)
         .expect("Failed to create IW44 page");
-    encoder.add_page(iw44_page).expect("Failed to add IW44 page");
-    
+    encoder
+        .add_page(iw44_page)
+        .expect("Failed to add IW44 page");
+
     // Page 4: Blank
-    encoder.add_page(PageComponents::new()).expect("Failed to add final blank page");
-    
+    encoder
+        .add_page(PageComponents::new())
+        .expect("Failed to add final blank page");
+
     // Encode document
     let mut encoded_data = Vec::new();
-    encoder.write_to(&mut encoded_data).expect("Failed to encode document");
-    
+    encoder
+        .write_to(&mut encoded_data)
+        .expect("Failed to encode document");
+
     // Validate
     validate_multipage_djvu_format(&encoded_data);
     assert!(encoded_data.len() > 500, "Document should be substantial");
     assert_eq!(&encoded_data[12..16], b"DJVM", "Should be DJVM format");
-    
+
     // Test with ddjvu if available
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let djvu_path = temp_dir.path().join("test_4page.djvu");
     {
         let mut file = File::create(&djvu_path).expect("Failed to create djvu file");
-        file.write_all(&encoded_data).expect("Failed to write djvu file");
+        file.write_all(&encoded_data)
+            .expect("Failed to write djvu file");
     }
     test_multipage_with_ddjvu(&djvu_path);
 }

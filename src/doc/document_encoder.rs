@@ -2,7 +2,7 @@ use crate::doc::djvu_dir::{DjVmDir, File, FileType};
 use crate::doc::page_encoder::PageComponents;
 use crate::{PageEncodeParams, Result};
 use byteorder::{BigEndian, WriteBytesExt};
-use std::io::{Cursor, Write};
+use std::io::Write;
 
 /// A high-level encoder for creating DjVu documents.
 ///
@@ -49,6 +49,11 @@ impl DocumentEncoder {
     /// Sets whether to encode in color (true) or grayscale (false).
     pub fn with_color(mut self, color: bool) -> Self {
         self.params.color = color;
+        self
+    }
+
+    pub fn with_decibels(mut self, decibels: f32) -> Self {
+        self.params.decibels = Some(decibels);
         self
     }
 
@@ -328,6 +333,7 @@ mod tests {
     use super::*;
     use crate::doc::page_encoder::PageComponents;
     use image::RgbImage;
+    use std::io::Cursor;
 
     #[test]
     fn test_single_page_document() -> Result<()> {

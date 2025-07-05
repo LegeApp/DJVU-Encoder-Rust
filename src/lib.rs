@@ -1,3 +1,5 @@
+#![feature(portable_simd)]
+
 //! A Rust library for encoding DjVu documents.
 //!
 //! This crate provides a high-level API for creating multi-page DjVu
@@ -5,8 +7,6 @@
 
 // Core modules
 pub mod annotations;
-pub mod arithmetic_coder;
-pub mod arithtable;
 pub mod doc;
 pub mod encode;
 pub mod iff;
