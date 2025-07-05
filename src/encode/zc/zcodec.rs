@@ -27,7 +27,9 @@ pub enum ZCodecError {
 ///
 /// ```
 /// use std::io::Cursor;
-/// // Assuming ZEncoder and BitContext are in the current scope
+/// use djvu_encoder::encode::zc::ZEncoder;
+/// use djvu_encoder::encode::zc::BitContext;
+/// 
 /// let mut encoder = ZEncoder::new(Cursor::new(Vec::new()), true).unwrap();
 /// let mut context = 0 as BitContext;
 ///

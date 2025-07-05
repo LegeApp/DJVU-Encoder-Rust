@@ -1,7 +1,6 @@
 //! An extension trait for `std::io::Write` to add helpers for writing
 //! custom integer types, such as 24-bit integers.
 
-use byteorder::BigEndian;
 use std::io::{self, Write};
 
 /// Extends `std::io::Write` with methods for writing 24-bit integers.

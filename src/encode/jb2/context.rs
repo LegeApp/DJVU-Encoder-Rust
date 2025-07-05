@@ -1,6 +1,6 @@
 // src/jb2/context.rs
 
-use crate::encode::zc::{ZEncoder, BitContext};
+use crate::encode::zc::ZEncoder;
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::symbol_dict::BitImage;
 use std::io::Write;

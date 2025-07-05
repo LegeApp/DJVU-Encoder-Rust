@@ -1,8 +1,20 @@
 // src/iw44/masking.rs
 
 use crate::encode::iw44::transform::Encode;
+use ::image::GrayImage;
 
-// Note: Bitmap, DjvuImageExt, and GrayImage are also not used in the actual code
+/// Convert GrayImage mask to i8 mask buffer
+pub fn image_to_mask8(mask_img: &GrayImage, bw: usize, ih: usize) -> Vec<i8> {
+    let mut mask8 = vec![0i8; bw * ih];
+    for y in 0..ih {
+        for x in 0..(mask_img.width() as usize).min(bw) {
+            // Non-zero mask pixels indicate masked-out regions
+            let mask_val = mask_img.get_pixel(x as u32, y as u32)[0];
+            mask8[y * bw + x] = if mask_val > 0 { 1 } else { 0 };
+        }
+    }
+    mask8
+}
 
 /// Performs the “interpolate_mask” step from IW44: fill in masked-out
 /// pixels by averaging neighbors across scales, so that later wavelet

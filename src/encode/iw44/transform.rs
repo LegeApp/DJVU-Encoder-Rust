@@ -2,8 +2,23 @@
 use rayon::prelude::*;
 use std::simd::Simd;
 
+use super::constants::IW_SHIFT;
+use ::image::GrayImage;
+
 // Use a type alias for Simd<i16, 4>
 type I16x4 = Simd<i16, 4>;
+
+/// Saturating conversion from i32 to i16 to prevent overflow
+#[inline]
+fn sat16(x: i32) -> i16 {
+    if x > 32_767 { 
+        32_767 
+    } else if x < -32_768 { 
+        -32_768 
+    } else { 
+        x as i16 
+    }
+}
 
 pub struct Encode;
 
@@ -20,31 +35,56 @@ impl Encode {
     /// * `begin` - Starting scale index (0 = scale 1, 1 = scale 2, etc.)
     /// * `end` - Ending scale index (exclusive)
     pub fn forward(p: &mut [i16], w: usize, h: usize, rowsize: usize, begin: usize, end: usize) {
-        #[cfg(debug_assertions)]
-        {
-            println!("DEBUG: Starting wavelet transform. First 3 before: {}, {}, {}", 
-                     p[0], p[1], p[2]);
-        }
-        
         for i in begin..end {
             let scale = 1 << i;
-            #[cfg(debug_assertions)]
-            println!("DEBUG: Transform scale {}", scale);
             filter_fv(p, w, h, rowsize, scale);
             filter_fh_parallel(p, w, h, rowsize, scale);
-            
-            #[cfg(debug_assertions)]
-            if scale <= 8 {  // Only log first few scales
-                println!("DEBUG: After scale {} - first 3: {}, {}, {}", 
-                         scale, p[0], p[1], p[2]);
+        }
+    }
+    
+    /// Prepare image data for wavelet transform with proper pixel shifting and centering.
+    /// This handles the conversion from various input formats to the i16 buffer format expected by the transform.
+    pub fn prepare_and_transform<F>(
+        data16: &mut [i16], 
+        w: usize, 
+        h: usize, 
+        bw: usize, 
+        pixel_fn: F
+    ) where F: Fn(usize, usize) -> i16 
+    {
+        // Copy pixels with proper shifting
+        for y in 0..h {
+            for x in 0..w {
+                data16[y * bw + x] = pixel_fn(x, y);
             }
         }
-
-        #[cfg(debug_assertions)]
-        println!("DEBUG: Wavelet transform complete. First 3 after: {}, {}, {}", 
-                 p[0], p[1], p[2]);
+        
+        // Apply forward transform with standard parameters (scales 1, 2, 4, 8, 16)
+        Self::forward(data16, w, h, bw, 0, 5);
+    }
+    
+    /// Helper for unsigned 8-bit image data (like GrayImage)
+    pub fn from_u8_image(img: &GrayImage, data16: &mut [i16], w: usize, h: usize, bw: usize) {
+        Self::prepare_and_transform(data16, w, h, bw, |x, y| {
+            let pixel_u8 = img.get_pixel(x as u32, y as u32)[0] as i16;
+            pixel_u8 << IW_SHIFT
+        });
+    }
+    
+    /// Helper for signed 8-bit channel data (Y, Cb, Cr)
+    pub fn from_i8_channel(channel_buf: &[i8], data16: &mut [i16], w: usize, h: usize, bw: usize) {
+        Self::prepare_and_transform(data16, w, h, bw, |x, y| {
+            let idx = y * w + x;
+            if idx < channel_buf.len() {
+                let pixel_i8 = channel_buf[idx];
+                (pixel_i8 as i16) << IW_SHIFT
+            } else {
+                0
+            }
+        });
     }
 }
+
 /// Optimized symmetric boundary extension (mirroring) for wavelet transforms.
 /// This function handles out-of-bounds indices by reflecting them back into the valid range.
 /// This is essential for the lifting scheme used in IW44 wavelets to avoid boundary artifacts.
@@ -162,7 +202,8 @@ fn filter_fv(p: &mut [i16], w: usize, h: usize, rowsize: usize, scale: usize) {
                         while i < end {
                             let a = p[row_y - s + i] as i32 + p[row_y + s + i] as i32;
                             let b = p[row_y - s3 + i] as i32 + p[row_y + s3 + i] as i32;
-                            temp[i - start] = p[row_y + i] - (((a * 9) - b + 16) >> 5) as i16;
+                            let delta = (((a * 9) - b + 16) >> 5);
+                            temp[i - start] = sat16(p[row_y + i] as i32 - delta);
                             i += 1;
                         }
                         temp
@@ -181,7 +222,8 @@ fn filter_fv(p: &mut [i16], w: usize, h: usize, rowsize: usize, scale: usize) {
                     while i < row_end {
                         let a = p[i - s] as i32 + p[i + s] as i32;
                         let b = p[i - s3] as i32 + p[i + s3] as i32;
-                        p[i] -= (((a * 9) - b + 16) >> 5) as i16;
+                        let delta = (((a * 9) - b + 16) >> 5);
+                        p[i] = sat16(p[i] as i32 - delta);
                         i += scale;
                     }
                 }
@@ -195,21 +237,24 @@ fn filter_fv(p: &mut [i16], w: usize, h: usize, rowsize: usize, scale: usize) {
                     while i < row_end {
                         let a = p[i - s] as i32 + if q1_offset != 0 { p[i + q1_offset] as i32 } else { 0 };
                         let b = p[i - s3] as i32 + if q3_offset != 0 { p[i + q3_offset] as i32 } else { 0 };
-                        p[i] -= (((a * 9) - b + 16) >> 5) as i16;
+                        let delta = (((a * 9) - b + 16) >> 5);
+                        p[i] = sat16(p[i] as i32 - delta);
                         i += scale;
                     }
                 } else if y >= 1 {
                     while i < row_end {
                         let a = p[i - s] as i32 + if q1_offset != 0 { p[i + q1_offset] as i32 } else { 0 };
                         let b = if q3_offset != 0 { p[i + q3_offset] as i32 } else { 0 };
-                        p[i] -= (((a * 9) - b + 16) >> 5) as i16;
+                        let delta = (((a * 9) - b + 16) >> 5);
+                        p[i] = sat16(p[i] as i32 - delta);
                         i += scale;
                     }
                 } else {
                     while i < row_end {
                         let a = if q1_offset != 0 { p[i + q1_offset] as i32 } else { 0 };
                         let b = if q3_offset != 0 { p[i + q3_offset] as i32 } else { 0 };
-                        p[i] -= (((a * 9) - b + 16) >> 5) as i16;
+                        let delta = (((a * 9) - b + 16) >> 5);
+                        p[i] = sat16(p[i] as i32 - delta);
                         i += scale;
                     }
                 }
@@ -285,7 +330,8 @@ fn filter_fv(p: &mut [i16], w: usize, h: usize, rowsize: usize, scale: usize) {
                     while i < row_end {
                         let a = p[i - s] as i32 + p[i + s] as i32;
                         let b = p[i - s3] as i32 + p[i + s3] as i32;
-                        p[i] += (((a * 9) - b + 8) >> 4) as i16;
+                        let delta = (((a * 9) - b + 8) >> 4);
+                        p[i] = sat16(p[i] as i32 + delta);
                         i += scale;
                     }
                 }
@@ -304,7 +350,8 @@ fn filter_fv(p: &mut [i16], w: usize, h: usize, rowsize: usize, scale: usize) {
                 let q3_offset = if y + 2 < h_scaled { s3 } else { 0 };
                 while i < row_end {
                     let a = p[i - s] as i32 + p[i + q1_offset] as i32;
-                    p[i] += ((a + 1) >> 1) as i16;
+                    let delta = ((a + 1) >> 1);
+                    p[i] = sat16(p[i] as i32 + delta);
                     i += scale;
                 }
             }
@@ -382,12 +429,16 @@ fn filter_fh(row: &mut [i16], w: usize, scale: usize) {
     for i in 0..num_even {
         let x = i * s2;
 
-        // Boundary-safe reads from the original row, mimicking the C code's zero-padding.
-        let p_x_minus_s3 = if x >= s3 { row[x - s3] } else { 0 };
-        let p_x_minus_s = if x >= s { row[x - s] } else { 0 };
-        // The check `x + s < w` is sufficient as `x` is always less than `w` for the last element.
-        let p_x_plus_s = if x + s < w { row[x + s] } else { 0 };
-        let p_x_plus_s3 = if x + s3 < w { row[x + s3] } else { 0 };
+        // Boundary-safe reads using symmetric mirroring instead of zero-padding
+        let idx_minus_s3 = mirror(x as isize - s3 as isize, w as isize);
+        let idx_minus_s = mirror(x as isize - s as isize, w as isize);
+        let idx_plus_s = mirror(x as isize + s as isize, w as isize);
+        let idx_plus_s3 = mirror(x as isize + s3 as isize, w as isize);
+        
+        let p_x_minus_s3 = row[idx_minus_s3];
+        let p_x_minus_s = row[idx_minus_s];
+        let p_x_plus_s = row[idx_plus_s];
+        let p_x_plus_s3 = row[idx_plus_s3];
 
         let neighbors_1s = p_x_minus_s as i32 + p_x_plus_s as i32;
         let neighbors_3s = p_x_minus_s3 as i32 + p_x_plus_s3 as i32;
@@ -412,24 +463,27 @@ fn filter_fh(row: &mut [i16], w: usize, scale: usize) {
     // Generic updates for the main part of the row.
     // An update at `x_update = (i * 2s) - 3s` requires `b` coeffs from `i-3` to `i`.
     for i in 3..num_even {
-        let x_update = (i * s2) - s3;
-        if x_update < w {
-            let b0 = b_coeffs[i - 3] as i32;
-            let b1 = b_coeffs[i - 2] as i32;
-            let b2 = b_coeffs[i - 1] as i32;
-            let b3 = b_coeffs[i] as i32;
+        // Check for underflow before subtracting s3
+        if i * s2 >= s3 {
+            let x_update = (i * s2) - s3;
+            if x_update < w {
+                let b0 = b_coeffs[i - 3] as i32;
+                let b1 = b_coeffs[i - 2] as i32;
+                let b2 = b_coeffs[i - 1] as i32;
+                let b3 = b_coeffs[i] as i32;
 
-            let b_sum_12 = b1 + b2;
-            let b_sum_03 = b0 + b3;
-            // The interpolation formula from the C code's generic case.
-            let update_val = (((b_sum_12 * 9) - b_sum_03 + 8) >> 4) as i16;
-            row[x_update] = row[x_update].wrapping_add(update_val);
+                let b_sum_12 = b1 + b2;
+                let b_sum_03 = b0 + b3;
+                // The interpolation formula from the C code's generic case.
+                let update_val = (((b_sum_12 * 9) - b_sum_03 + 8) >> 4);
+                row[x_update] = sat16(row[x_update] as i32 + update_val);
+            }
         }
     }
 
     // Boundary updates at the start and end of the row, which use a simplified formula.
     // This logic corresponds to the special-case loops in the C implementation.
-    let simplified_update = |b1, b2| (((b1 as i32 + b2 as i32 + 1) >> 1) as i16);
+    let simplified_update = |b1, b2| (((b1 as i32 + b2 as i32 + 1) >> 1));
 
     // Update for position `s` (corresponds to `q` at `4s` in C, so `i=2`).
     if 2 < num_even {
@@ -437,20 +491,36 @@ fn filter_fh(row: &mut [i16], w: usize, scale: usize) {
         if x_update < w {
             let b1 = b_coeffs[0]; // from x=0
             let b2 = b_coeffs[1]; // from x=2s
-            row[x_update] = row[x_update].wrapping_add(simplified_update(b1, b2));
+            row[x_update] = sat16(row[x_update] as i32 + simplified_update(b1, b2));
         }
     }
     
     // Trailing updates for odd positions near the end of the row.
     // This corresponds to the `while (q - s3 < e)` loop in the C code.
     for i in num_even..(num_even + 2) {
-        let x_update = (i * s2) - s3;
-        if x_update < w {
-            // These `b` values are conceptually outside the main `b_coeffs` array.
-            // We get as many as are available and assume the rest are zero.
-            let b1 = b_coeffs.get(i - 2).copied().unwrap_or(0);
-            let b2 = b_coeffs.get(i - 1).copied().unwrap_or(0);
-            row[x_update] = row[x_update].wrapping_add(simplified_update(b1, b2));
+        // Check for underflow before subtracting s3
+        if i * s2 >= s3 {
+            let x_update = (i * s2) - s3;
+            if x_update < w {
+                // These `b` values are conceptually outside the main `b_coeffs` array.
+                // We get as many as are available and assume the rest are zero.
+                // Check for underflow before subtracting
+                let b1 = if i >= 2 { b_coeffs.get(i - 2).copied().unwrap_or(0) } else { 0 };
+                let b2 = if i >= 1 { b_coeffs.get(i - 1).copied().unwrap_or(0) } else { 0 };
+                row[x_update] = sat16(row[x_update] as i32 + simplified_update(b1, b2));
+            }
         }
+    }
+}
+
+pub struct Decode;
+
+impl Decode {
+    /// Backward wavelet transform using the lifting scheme.
+    /// This is a placeholder and needs to be properly implemented.
+    pub fn backward(p: &mut [i16], w: usize, h: usize, rowsize: usize, begin: usize, end: usize) {
+        // TODO: Implement the inverse wavelet transform
+        // For now, it does nothing to allow compilation.
+        let _ = (p, w, h, rowsize, begin, end);
     }
 }

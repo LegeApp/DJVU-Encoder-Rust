@@ -3,11 +3,11 @@
 //! This implements the JB2 encoding as specified in Appendix 2 of the DjVu specification,
 //! producing a single Sjbz chunk with arithmetically encoded records.
 
-use crate::encode::zc::{ZEncoder, ZCodecError, BitContext};
+use crate::encode::zc::ZEncoder;
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::symbol_dict::BitImage;
 use crate::encode::jb2::num_coder::NumCoder;
-use std::io::{Cursor, Write};
+use std::io::Write;
 
 // Context allocation as per DjVu specification Table 7
 const RECORD_TYPE_CONTEXT: usize = 0;

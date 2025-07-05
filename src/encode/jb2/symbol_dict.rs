@@ -2,7 +2,7 @@
 //! and provides utilities for their manipulation, such as sorting for optimal
 //! dictionary encoding.
 
-use crate::encode::zc::{ZEncoder, BitContext};
+use crate::encode::zc::ZEncoder;
 use crate::encode::jb2::context;
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::num_coder::NumCoder;

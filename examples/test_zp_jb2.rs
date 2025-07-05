@@ -1,9 +1,7 @@
-use std::io::Cursor;
 use djvu_encoder::encode::jb2::symbol_dict::BitImage;
-use djvu_encoder::encode::zc::{ZEncoder, BitContext};
+use djvu_encoder::encode::zc::ZEncoder;
 use djvu_encoder::doc::DocumentEncoder;
 use djvu_encoder::doc::page_encoder::PageComponents;
-use std::io::Write;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing ZP-based JB2 encoding...");

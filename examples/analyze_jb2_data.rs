@@ -185,31 +185,33 @@ fn analyze_djvu_page(filename: &str) -> Result<(), Box<dyn std::error::Error>> {
 fn test_arithmetic_coder_directly() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Testing Arithmetic Coder Directly ===");
     
-    use djvu_encoder::arithmetic_coder::ArithmeticEncoder;
-    use djvu_encoder::arithtable::MQ_STATE_TABLE;
+    use djvu_encoder::encode::zc::zcodec::ZEncoder;
+
     use std::io::Cursor;
+    use djvu_encoder::encode::zc::zcodec::BitContext;
     
     // Test the arithmetic coder with minimal data
     let mut buffer = Cursor::new(Vec::new());
     
-    {
-        let mut ac = ArithmeticEncoder::<_, 1024>::new(
-            &mut buffer,
-            &MQ_STATE_TABLE,
-            1024,
-            true,
-        )?;
+    let encoded_data = {
+        let mut ac = ZEncoder::new(
+            buffer,
+            true
+        )?; 
         
         // Encode a few simple bits
-        ac.encode_bit(0, false)?;
-        ac.encode_bit(0, true)?;
-        ac.encode_bit(0, false)?;
-        ac.encode_bit(0, true)?;
+        let mut ctx0 = 0 as BitContext;
+        let mut ctx1 = 1 as BitContext;
+        let mut ctx2 = 2 as BitContext;
+        let mut ctx3 = 3 as BitContext;
+
+        ac.encode(false, &mut ctx0).unwrap();
+        ac.encode(true, &mut ctx1).unwrap();
+        ac.encode(false, &mut ctx2).unwrap();
+        ac.encode(true, &mut ctx3).unwrap();
         
-        ac.flush(true)?;
-    }
-    
-    let encoded_data = buffer.into_inner();
+        ac.finish()?.into_inner()
+    };
     println!("Arithmetic coder test: {} bytes", encoded_data.len());
     println!("Data: {:02X?}", encoded_data);
     

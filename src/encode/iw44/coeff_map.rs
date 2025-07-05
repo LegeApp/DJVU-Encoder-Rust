@@ -1,6 +1,6 @@
-use super::constants::{IW_SHIFT, ZIGZAG_LOC};
+use super::constants::ZIGZAG_LOC;
 use super::masking;
-use super::transform;
+use super::transform::Encode;
 use ::image::GrayImage;
 
 /// Replaces `IW44Image::Block`, storing coefficients for a 32x32 image block.
@@ -95,58 +95,54 @@ impl CoeffMap {
         self.ih
     }
 
-    /// Create coefficients from an image. Corresponds to `Map::Encode::create`.
-    pub fn create_from_image(img: &GrayImage, mask: Option<&GrayImage>) -> Self {
-        let (w, h) = img.dimensions();
-        let mut map = Self::new(w as usize, h as usize);
+    /// Private helper to copy a 32x32 block from the transform buffer to a liftblock
+    fn copy_block_data(
+        liftblock: &mut [i16; 1024], 
+        data16: &[i16], 
+        bw: usize, 
+        block_x: usize, 
+        block_y: usize
+    ) {
+        let data_start_x = block_x * 32;
+        let data_start_y = block_y * 32;
 
+        for i in 0..32 {
+            let src_y = data_start_y + i;
+            let src_offset = src_y * bw + data_start_x;
+            let dst_offset = i * 32;
+            liftblock[dst_offset..dst_offset + 32]
+                .copy_from_slice(&data16[src_offset..src_offset + 32]);
+        }
+    }
+
+    /// Private helper that does the core work: allocate buffer, transform, populate blocks
+    fn create_from_transform<F>(
+        width: usize,
+        height: usize,
+        mask: Option<&GrayImage>,
+        transform_fn: F
+    ) -> Self 
+    where F: FnOnce(&mut [i16], usize, usize, usize)
+    {
+        let mut map = Self::new(width, height);
+        
         // Allocate decomposition buffer (padded)
         let mut data16 = vec![0i16; map.bw * map.bh];
 
-        // Copy pixels from GrayImage to i16 buffer, shifting up.
-        // Note: The GrayImage here comes from signed Y channel data that was
-        // converted back to unsigned 0-255 range, so we can use it directly.
-        for y in 0..map.ih {
-            for x in 0..map.iw {
-                // The GrayImage contains the Y channel in 0-255 range.
-                // Apply IW_SHIFT scaling as per DjVu specification.
-                let pixel_u8 = img.get_pixel(x as u32, y as u32)[0] as i16;
-                data16[y * map.bw + x] = pixel_u8 << IW_SHIFT;
-            }
-        }
-
-        // Debug: Print some pixel values before transform
-        println!("DEBUG: Before transform - first 3 pixels: {}, {}, {}", 
-                 data16[0], data16[1], data16[2]);
-        println!("DEBUG: Pixel shift: original Y {} -> scaled {}", 
-                 img.get_pixel(0, 0)[0], data16[0]);
+        // Apply transform function to populate data16
+        transform_fn(&mut data16, map.iw, map.ih, map.bw);
 
         // Apply masking logic if mask is provided
         if let Some(mask_img) = mask {
-            // Convert mask image to signed i8 array
-            let mut mask8 = vec![0i8; map.bw * map.bh];
-            for y in 0..map.ih {
-                for x in 0..map.iw {
-                    // Non-zero mask pixels indicate masked-out regions
-                    let mask_val = mask_img.get_pixel(x as u32, y as u32)[0];
-                    mask8[y * map.bw + x] = if mask_val > 0 { 1 } else { 0 };
-                }
-            }
-
+            // Convert mask image to signed i8 array using masking helper
+            let mask8 = masking::image_to_mask8(mask_img, map.bw, map.ih);
+            
             // Apply interpolate_mask to fill masked pixels with neighbor averages
             masking::interpolate_mask(&mut data16, map.iw, map.ih, map.bw, &mask8, map.bw);
 
             // Apply forward_mask for multiscale masked wavelet decomposition
             masking::forward_mask(&mut data16, map.iw, map.ih, map.bw, 1, 32, &mask8, map.bw);
-        } else {
-            // Perform traditional wavelet decomposition without masking
-            // Fixed: begin=0 to include finest scale (scale=1) transform
-            transform::Encode::forward(&mut data16, map.iw, map.ih, map.bw, 0, 5);
         }
-
-        // Debug: Print some coefficient values after transform
-        println!("DEBUG: After transform - first 3 coeffs: {}, {}, {}", 
-                 data16[0], data16[1], data16[2]);
 
         // Copy transformed coefficients into blocks
         let blocks_w = map.bw / 32;
@@ -155,46 +151,46 @@ impl CoeffMap {
                 let block_idx = block_y * blocks_w + block_x;
                 let mut liftblock = [0i16; 1024];
 
-                let data_start_x = block_x * 32;
-                let data_start_y = block_y * 32;
-
-                for i in 0..32 {
-                    let src_y = data_start_y + i;
-                    let src_offset = src_y * map.bw + data_start_x;
-                    let dst_offset = i * 32;
-                    liftblock[dst_offset..dst_offset + 32]
-                        .copy_from_slice(&data16[src_offset..src_offset + 32]);
-                }
-
+                Self::copy_block_data(&mut liftblock, &data16, map.bw, block_x, block_y);
                 map.blocks[block_idx].read_liftblock(&liftblock);
-
-                // Debug: Print some coefficient values for the first few blocks
-                if block_idx < 3 {
-                    let dc_coeff = liftblock[ZIGZAG_LOC[0] as usize];
-                    let low_freq_coeffs: Vec<i16> =
-                        (0..4).map(|i| liftblock[ZIGZAG_LOC[i] as usize]).collect();
-                    println!(
-                        "DEBUG: Block {}: DC={}, low_freq={:?}",
-                        block_idx, dc_coeff, low_freq_coeffs
-                    );
-                    
-                    // Debug: Check zigzag mapping for first 16 coefficients
-                    if block_idx == 0 {
-                        println!("DEBUG: First 16 zigzag mappings and values:");
-                        for i in 0..16 {
-                            let loc = ZIGZAG_LOC[i] as usize;
-                            let val = liftblock[loc];
-                            println!("  zigzag[{}] -> liftblock[{}] = {}", i, loc, val);
-                        }
-                    }
-                }
             }
         }
 
-        #[cfg(debug_assertions)]
-        println!("CoeffMap::create_from_image - Completed successfully");
-
         map
+    }
+
+    /// Create coefficients from an image. Corresponds to `Map::Encode::create`.
+    pub fn create_from_image(img: &GrayImage, mask: Option<&GrayImage>) -> Self {
+        let (w, h) = img.dimensions();
+        Self::create_from_transform(w as usize, h as usize, mask, |data16, w, h, bw| {
+            Encode::from_u8_image(img, data16, w, h, bw);
+        })
+    }
+
+    /// Create a CoeffMap from signed Y channel data (centered around 0)
+    pub fn create_from_signed_y_buffer(
+        y_buf: &[i8], 
+        width: u32, 
+        height: u32, 
+        mask: Option<&GrayImage>
+    ) -> Self {
+        Self::create_from_transform(width as usize, height as usize, mask, |data16, w, h, bw| {
+            Encode::from_i8_channel(y_buf, data16, w, h, bw);
+        })
+    }
+
+    /// Create a CoeffMap from signed i8 channel data (Y, Cb, or Cr)
+    /// The input data should be centered around 0 (range approximately -128 to +127)
+    pub fn create_from_signed_channel(
+        channel_buf: &[i8], 
+        width: u32, 
+        height: u32, 
+        mask: Option<&GrayImage>,
+        _channel_name: &str  // Keep for API compatibility but don't use for debug
+    ) -> Self {
+        Self::create_from_transform(width as usize, height as usize, mask, |data16, w, h, bw| {
+            Encode::from_i8_channel(channel_buf, data16, w, h, bw);
+        })
     }
 
     pub fn slash_res(&mut self, res: usize) {

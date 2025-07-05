@@ -4,7 +4,7 @@
 //! set of contexts to encode the (x, y) position of a symbol relative to the
 //! previously encoded symbol.
 
-use crate::encode::zc::{ZEncoder, BitContext};
+use crate::encode::zc::ZEncoder;
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::num_coder::{NumCoder, BIG_NEGATIVE, BIG_POSITIVE};
 use crate::encode::jb2::symbol_dict::BitImage;

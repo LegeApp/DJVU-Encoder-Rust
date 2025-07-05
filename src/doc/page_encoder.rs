@@ -299,13 +299,20 @@ impl PageComponents {
         }
 
         // Configure IW44 encoder with proper quality-based parameters
+        // Map quality to decibels if not explicitly set
+        let target_decibels = params.decibels.unwrap_or_else(|| {
+            // Map quality 0-100 to reasonable dB range (30-100 dB)
+            let quality_ratio = params.bg_quality as f32 / 100.0;
+            30.0 + quality_ratio * 70.0 // 30-100 dB range
+        });
+        
         println!(
-            "DEBUG: Configuring IW44 encoder with quality {:?}",
-            params.decibels
+            "DEBUG: Configuring IW44 encoder with quality {} -> {:.1} dB",
+            params.bg_quality, target_decibels
         );
 
         let iw44_params = IW44EncoderParams {
-            decibels: params.decibels,
+            decibels: Some(target_decibels),
             crcb_mode,
             ..Default::default()
         };
@@ -473,8 +480,8 @@ mod tests {
         assert_eq!(&encoded[0..8], b"AT&TFORM");
         // Check for INFO chunk
         assert!(encoded.windows(4).any(|w| w == b"INFO"));
-        // Check for PM44 chunk (since that's the default for color images)
-        assert!(encoded.windows(4).any(|w| w == b"PM44"));
+        // Check for BG44 chunk (since this is a page background, not PM44)
+        assert!(encoded.windows(4).any(|w| w == b"BG44"));
         // Check for text chunk
         assert!(encoded.windows(4).any(|w| w == b"TXTa"));
     }

@@ -52,8 +52,8 @@ impl Codec {
         codec.quant_lo = IW_QUANT;  // Direct copy of all 16 step sizes
         
         // For high-frequency bands, use the appropriate step sizes
-        // Band 0 uses quant_lo, bands 1-9 use specific step size indices
-        codec.quant_hi[0] = 0;  // Band 0 not used in quant_hi
+        // Band 0 uses IW_QUANT[0], bands 1-9 use indices 7-15
+        codec.quant_hi[0] = IW_QUANT[0];  // Band 0 -> step size index 0
         for j in 1..10 {
             let step_size_idx = match j {
                 1 => 7,   // Band 1 -> step size index 7
@@ -81,11 +81,6 @@ impl Codec {
 
         // Check if this slice contains any significant data
         let is_null = self.is_null_slice(self.cur_bit as usize, self.cur_band);
-        
-        // Debug output for first few slices
-        if (self.cur_bit == 15 && self.cur_band < 3) || (self.cur_bit >= 13 && self.cur_band == 0) {
-            println!("DEBUG: Slice bit={}, band={}, is_null={}", self.cur_bit, self.cur_band, is_null);
-        }
         
         if !is_null {
             for blockno in 0..self.map.num_blocks {

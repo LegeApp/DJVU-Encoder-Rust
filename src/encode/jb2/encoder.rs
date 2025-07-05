@@ -4,14 +4,12 @@
 //! dictionary encoder, record stream encoder) together to provide a simple
 //! public API for encoding a full JB2 page.
 
-use crate::encode::zc::{ZEncoder, BitContext};
+use crate::encode::zc::ZEncoder;
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::record::RecordStreamEncoder;
 use crate::encode::jb2::symbol_dict::{
     BitImage, ConnectedComponent, SymDictBuilder, SymDictEncoder,
 };
-use crate::utils::write_ext::WriteBytesExtU24;
-use byteorder::BigEndian;
 use std::io::{Cursor, Write};
 
 // Context partitioning for the JB2 encoder.

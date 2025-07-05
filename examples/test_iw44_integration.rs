@@ -1,5 +1,5 @@
 use djvu_encoder::encode::iw44::{encoder::IWEncoder, encoder::EncoderParams};
-use image::{GrayImage, RgbImage};
+use image::GrayImage;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a simple test image
