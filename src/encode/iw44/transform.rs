@@ -43,14 +43,18 @@ impl Encode {
         let mut cur_w = w;
         let mut cur_h = h;
 
-        for level in 0..levels {
-            let scale = 1 << level; // Scale factor for this level
+        for _level in 0..levels {
+            let scale = 1; // After splitting each level operates on a decimated area
 
-            // DjVu's IW44 performs the horizontal filter first, then the
-            // vertical filter for each decomposition level.  Doing it in this
-            // order is required for lossless DC preservation.
+            // DjVu's IW44 applies a horizontal pass followed by a vertical
+            // pass for each decomposition level.  After each pass, the
+            // coefficients are split so that the low-pass portion occupies the
+            // top-left corner for the next level.
             fwt_horizontal_inplace_single_level::<LANES>(buf, w, cur_w, cur_h, scale);
+            split_horizontal::<LANES>(buf, w, cur_w, cur_h, scale);
+
             fwt_vertical_inplace_single_level::<LANES>(buf, w, cur_w, cur_h, scale);
+            split_vertical::<LANES>(buf, w, cur_w, cur_h, scale);
 
             // Next level operates on the even samples only
             cur_w = (cur_w + 1) / 2;
@@ -331,6 +335,90 @@ pub fn fwt_horizontal_inplace_single_level<const LANES: usize>(
             let upd = (-d_2 + 9 * d_1 + 9 * d0 - d1 + 16) >> 5;
             let idx = base + x * sc;
             buf[idx] += upd;
+        }
+    }
+}
+
+/// Rearrange coefficients after the horizontal pass so that even (low-pass)
+/// samples come first followed by the odd (high-pass) samples. This matches
+/// the layout expected by subsequent transform levels.
+pub fn split_horizontal<const LANES: usize>(
+    buf: &mut [i32],
+    full_w: usize,
+    work_w: usize,
+    work_h: usize,
+    scale: usize,
+) where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    let w0 = ((work_w - 1) / scale) + 1;
+    if w0 < 2 {
+        return;
+    }
+
+    let mut temp = vec![0i32; work_w];
+    let step = scale * 2;
+
+    for row in 0..work_h {
+        let start = row * full_w;
+        let row_slice = &mut buf[start..start + work_w];
+        temp.copy_from_slice(row_slice);
+
+        let mut idx = 0;
+        let mut x = 0;
+        while x < work_w {
+            row_slice[idx] = temp[x];
+            idx += 1;
+            x += step;
+        }
+
+        x = scale;
+        while x < work_w {
+            row_slice[idx] = temp[x];
+            idx += 1;
+            x += step;
+        }
+    }
+}
+
+/// Rearrange coefficients after the vertical pass so that even (low-pass)
+/// rows are stored first followed by the odd (high-pass) rows.
+pub fn split_vertical<const LANES: usize>(
+    buf: &mut [i32],
+    full_w: usize,
+    work_w: usize,
+    work_h: usize,
+    scale: usize,
+) where
+    LaneCount<LANES>: SupportedLaneCount,
+{
+    let h0 = ((work_h - 1) / scale) + 1;
+    if h0 < 2 {
+        return;
+    }
+
+    let step = scale * 2;
+    let mut temp_col = vec![0i32; work_h];
+
+    for col in 0..work_w {
+        // gather column
+        for y in 0..work_h {
+            temp_col[y] = buf[y * full_w + col];
+        }
+
+        let mut idx = 0;
+        let mut y = 0;
+        while y < work_h {
+            buf[idx * full_w + col] = temp_col[y];
+            idx += 1;
+            y += step;
+        }
+
+        y = scale;
+        while y < work_h {
+            buf[idx * full_w + col] = temp_col[y];
+            idx += 1;
+            y += step;
         }
     }
 }
