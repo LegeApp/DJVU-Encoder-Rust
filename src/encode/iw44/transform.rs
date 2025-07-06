@@ -44,14 +44,15 @@ impl Encode {
         let mut cur_h = h;
 
         for level in 0..levels {
-            let scale = 1 << level;  // Scale factor for this level
-            
-            // Vertical, then horizontal, on the top-left (low-pass) area only
-            // This order is critical to preserve DC coefficients exactly
-            fwt_vertical_inplace_single_level::<LANES>(buf, w, cur_w, cur_h, scale);
-            fwt_horizontal_inplace_single_level::<LANES>(buf, w, cur_w, cur_h, scale);
+            let scale = 1 << level; // Scale factor for this level
 
-            // Next scale works on the even samples only
+            // DjVu's IW44 performs the horizontal filter first, then the
+            // vertical filter for each decomposition level.  Doing it in this
+            // order is required for lossless DC preservation.
+            fwt_horizontal_inplace_single_level::<LANES>(buf, w, cur_w, cur_h, scale);
+            fwt_vertical_inplace_single_level::<LANES>(buf, w, cur_w, cur_h, scale);
+
+            // Next level operates on the even samples only
             cur_w = (cur_w + 1) / 2;
             cur_h = (cur_h + 1) / 2;
         }
@@ -249,96 +250,36 @@ pub fn fwt_vertical_inplace_single_level<const LANES: usize>(
 ) where
     LaneCount<LANES>: SupportedLaneCount,
 {
-    // If the working height is smaller than the scale, the transform is a no-op.
-    if work_h <= scale {
+    let h0 = ((work_h - 1) / scale) + 1;
+    if h0 < 2 {
         return;
     }
 
-    assert!(
-        buf.len() >= work_h * full_w,
-        "buffer length must be at least work_h * full_w"
-    );
+    let rs = full_w;
 
-    // Process columns sequentially within the working rectangle
-    for col in 0..work_w {
-        // Create a vector to hold this column's data
-        let mut col_vec = vec![0i32; work_h];
-        
-        // Gather column data
-        for y in 0..work_h {
-            col_vec[y] = buf[y * full_w + col];
+    // Predict step on odd rows
+    for y in (1..h0).step_by(2) {
+        for x in 0..work_w {
+            let xe1 = buf[mirror(y as isize - 1, h0) * scale * rs + x];
+            let xe0 = buf[mirror(y as isize + 1, h0) * scale * rs + x];
+            let xe_1 = buf[mirror(y as isize - 3, h0) * scale * rs + x];
+            let xe2 = buf[mirror(y as isize + 3, h0) * scale * rs + x];
+            let pred = (-xe_1 + 9 * xe1 + 9 * xe0 - xe2 + 8) >> 4;
+            let idx = y * scale * rs + x;
+            buf[idx] -= pred;
         }
+    }
 
-        // Re-usable detail buffer (predict output).
-        let mut detail = vec![0i32; work_h];
-
-        let s = scale;  // current scale
-        let dbl = s * 2; // stride between low-pass samples
-
-        /* ---------- PREDICT (1-Δ) ---------- */
-        let mut y = s;
-        let simd_step = dbl * LANES; // each SIMD lane processes an odd sample
-
-        // SIMD core
-        while y + simd_step <= work_h {
-            let mut centre = [0i32; LANES];
-            let mut above  = [0i32; LANES];
-            let mut below  = [0i32; LANES];
-
-            for lane in 0..LANES {
-                let yi = y + lane * dbl;
-                centre[lane] = col_vec[yi];
-                above[lane]  = col_vec[mirror(yi as isize - s as isize, work_h)];
-                below[lane]  = col_vec[mirror(yi as isize + s as isize, work_h)];
-            }
-
-            let c = Simd::<i32, LANES>::from_array(centre);
-            let a = Simd::<i32, LANES>::from_array(above);
-            let b = Simd::<i32, LANES>::from_array(below);
-
-            let pred = (a + b) >> Simd::splat(1); // floor((a+b)/2)
-            let det = c - pred;
-
-            for lane in 0..LANES {
-                detail[y + lane * dbl] = det[lane];
-            }
-            y += simd_step;
-        }
-
-        // Scalar tail / boundaries
-        while y < work_h {
-            let ya = mirror(y as isize - s as isize, work_h);
-            let yb = mirror(y as isize + s as isize, work_h);
-            let pred = (col_vec[ya] + col_vec[yb]) >> 1; // floor division
-            detail[y] = col_vec[y] - pred;
-            y += dbl;
-        }
-
-        // ---- UPDATE STEP ----
-        let mut k = 0;
-        while k < work_h {
-            let left_idx = mirror(k as isize - s as isize, work_h);
-            let right_idx = mirror(k as isize + s as isize, work_h);
-            let left_detail = detail[left_idx];
-            let right_detail = detail[right_idx];
-            
-            let sum = left_detail + right_detail;
-            let update = sum >> 1;
-            
-            col_vec[k] += update;
-            k += dbl;
-        }
-
-        /* ---------- COPY DETAIL BACK ---------- */
-        let mut y_copy = s;
-        while y_copy < work_h {
-            col_vec[y_copy] = detail[y_copy];
-            y_copy += dbl;
-        }
-
-        // Scatter column data back
-        for y_scatter in 0..work_h {
-            buf[y_scatter * full_w + col] = col_vec[y_scatter];
+    // Update step on even rows
+    for y in (0..h0).step_by(2) {
+        for x in 0..work_w {
+            let d_1 = buf[mirror(y as isize - 1, h0) * scale * rs + x];
+            let d0 = buf[mirror(y as isize + 1, h0) * scale * rs + x];
+            let d_2 = buf[mirror(y as isize - 3, h0) * scale * rs + x];
+            let d1 = buf[mirror(y as isize + 3, h0) * scale * rs + x];
+            let upd = (-d_2 + 9 * d_1 + 9 * d0 - d1 + 16) >> 5;
+            let idx = y * scale * rs + x;
+            buf[idx] += upd;
         }
     }
 }
@@ -360,50 +301,36 @@ pub fn fwt_horizontal_inplace_single_level<const LANES: usize>(
 ) where
     LaneCount<LANES>: SupportedLaneCount,
 {
-    // No-op when width too small
-    if work_w <= scale { return; }
-    assert!(buf.len() >= work_h * full_w, "buffer must be at least work_h * full_w pixels");
+    let w0 = ((work_w - 1) / scale) + 1;
+    if w0 < 2 {
+        return;
+    }
 
-    let s = scale;
-    let dbl = s * 2;
+    let sc = scale;
 
     for row in 0..work_h {
-        let row_start = row * full_w;
-        let row_slice = &mut buf[row_start..row_start + work_w];
-        let mut detail = vec![0i32; work_w];
+        let base = row * full_w;
 
-        // PREDICT step: compute detail coefficients
-        let mut k = s;
-        while k < work_w {
-            let c = row_slice[k];
-            let k0 = k as isize;
-            let c_m3 = if k0 >= 3 * (s as isize) { row_slice[((k0 - 3 * (s as isize)) as usize)] } else { 0 };
-            let c_m1 = if k0 >= (s as isize) { row_slice[((k0 - (s as isize)) as usize)] } else { 0 };
-            let c_p1 = if (k0 + (s as isize)) < (work_w as isize) { row_slice[((k0 + (s as isize)) as usize)] } else { 0 };
-            let c_p3 = if (k0 + 3 * (s as isize)) < (work_w as isize) { row_slice[((k0 + 3 * (s as isize)) as usize)] } else { 0 };
-            let pred = (-c_m3 + 9 * c_m1 + 9 * c_p1 - c_p3) >> 4;
-            detail[k] = c - pred;
-            k += dbl;
+        // Predict step on odd columns
+        for x in (1..w0).step_by(2) {
+            let xe1 = buf[base + mirror(x as isize - 1, w0) * sc];
+            let xe0 = buf[base + mirror(x as isize + 1, w0) * sc];
+            let xe_1 = buf[base + mirror(x as isize - 3, w0) * sc];
+            let xe2 = buf[base + mirror(x as isize + 3, w0) * sc];
+            let pred = (-xe_1 + 9 * xe1 + 9 * xe0 - xe2 + 8) >> 4;
+            let idx = base + x * sc;
+            buf[idx] -= pred;
         }
 
-        // UPDATE step: adjust approximation coefficients
-        let mut k = 0;
-        while k < work_w {
-            let k0 = k as isize;
-            let d_m3 = if k0 >= 3 * (s as isize) { detail[((k0 - 3 * (s as isize)) as usize)] } else { 0 };
-            let d_m1 = if k0 >= (s as isize) { detail[((k0 - (s as isize)) as usize)] } else { 0 };
-            let d_p1 = if (k0 + (s as isize)) < (work_w as isize) { detail[((k0 + (s as isize)) as usize)] } else { 0 };
-            let d_p3 = if (k0 + 3 * (s as isize)) < (work_w as isize) { detail[((k0 + 3 * (s as isize)) as usize)] } else { 0 };
-            let update = (-d_m3 + 9 * d_m1 + 9 * d_p1 - d_p3) >> 4;
-            row_slice[k] += update;
-            k += dbl;
-        }
-
-        // WRITE detail coefficients back
-        let mut k = s;
-        while k < work_w {
-            row_slice[k] = detail[k];
-            k += dbl;
+        // Update step on even columns
+        for x in (0..w0).step_by(2) {
+            let d_1 = buf[base + mirror(x as isize - 1, w0) * sc];
+            let d0 = buf[base + mirror(x as isize + 1, w0) * sc];
+            let d_2 = buf[base + mirror(x as isize - 3, w0) * sc];
+            let d1 = buf[base + mirror(x as isize + 3, w0) * sc];
+            let upd = (-d_2 + 9 * d_1 + 9 * d0 - d1 + 16) >> 5;
+            let idx = base + x * sc;
+            buf[idx] += upd;
         }
     }
 }
