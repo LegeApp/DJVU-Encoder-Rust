@@ -125,7 +125,7 @@ impl CoeffMap {
         mask: Option<&GrayImage>,
         transform_fn: F
     ) -> Self 
-    where F: FnOnce(&mut [i32], usize, usize)
+    where F: FnOnce(&mut [i32], usize, usize, usize)  // Added stride parameter
     {
         let mut map = Self::new(width, height);
         
@@ -133,28 +133,23 @@ impl CoeffMap {
         let mut data32 = vec![0i32; map.bw * map.bh];
 
         // Apply transform function to populate data32
-        // Note: Transform works on the full padded buffer (bw x bh), not just image size (iw x ih)
-        transform_fn(&mut data32, map.bw, map.bh);
+        // Pass actual image size (iw, ih) and stride (bw) to handle padding correctly
+        transform_fn(&mut data32, map.iw, map.ih, map.bw);
+
+        // Apply the actual wavelet transform to convert pixels to coefficients
+        let levels = ((map.bw.min(map.bh) as f32).log2() as usize).min(5);
+        Encode::forward::<4>(&mut data32, map.bw, map.bh, levels);
 
         // Apply masking logic if mask is provided
         if let Some(mask_img) = mask {
-            // For now, masking functions still work with i16 data, so we need to convert
-            // TODO: Update masking functions to work with i32 data
-            let mut data16 = data32.iter().map(|&x| x.clamp(-32768, 32767) as i16).collect::<Vec<_>>();
-            
-            // Convert mask image to signed i8 array using masking helper
+            // Now masking functions work directly with i32 data
             let mask8 = masking::image_to_mask8(mask_img, map.bw, map.ih);
             
             // Apply interpolate_mask to fill masked pixels with neighbor averages
-            masking::interpolate_mask(&mut data16, map.iw, map.ih, map.bw, &mask8, map.bw);
+            masking::interpolate_mask(&mut data32, map.iw, map.ih, map.bw, &mask8, map.bw);
 
             // Apply forward_mask for multiscale masked wavelet decomposition
-            masking::forward_mask(&mut data16, map.iw, map.ih, map.bw, 1, 32, &mask8, map.bw);
-            
-            // Convert back to i32
-            for (dst, &src) in data32.iter_mut().zip(data16.iter()) {
-                *dst = src as i32;
-            }
+            masking::forward_mask(&mut data32, map.iw, map.ih, map.bw, 1, 32, &mask8, map.bw);
         }
 
         // Copy transformed coefficients into blocks
@@ -175,8 +170,8 @@ impl CoeffMap {
     /// Create coefficients from an image. Corresponds to `Map::Encode::create`.
     pub fn create_from_image(img: &GrayImage, mask: Option<&GrayImage>) -> Self {
         let (w, h) = img.dimensions();
-        Self::create_from_transform(w as usize, h as usize, mask, |data32, w, h| {
-            Encode::from_u8_image(img, data32, w, h);
+        Self::create_from_transform(w as usize, h as usize, mask, |data32, iw, ih, stride| {
+            Encode::from_u8_image_with_stride(img, data32, iw, ih, stride);
         })
     }
 
@@ -187,8 +182,8 @@ impl CoeffMap {
         height: u32, 
         mask: Option<&GrayImage>
     ) -> Self {
-        Self::create_from_transform(width as usize, height as usize, mask, |data32, w, h| {
-            Encode::from_i8_channel(y_buf, data32, w, h);
+        Self::create_from_transform(width as usize, height as usize, mask, |data32, iw, ih, stride| {
+            Encode::from_i8_channel_with_stride(y_buf, data32, iw, ih, stride);
         })
     }
 
@@ -201,8 +196,8 @@ impl CoeffMap {
         mask: Option<&GrayImage>,
         _channel_name: &str  // Keep for API compatibility but don't use for debug
     ) -> Self {
-        Self::create_from_transform(width as usize, height as usize, mask, |data32, w, h| {
-            Encode::from_i8_channel(channel_buf, data32, w, h);
+        Self::create_from_transform(width as usize, height as usize, mask, |data32, iw, ih, stride| {
+            Encode::from_i8_channel_with_stride(channel_buf, data32, iw, ih, stride);
         })
     }
 

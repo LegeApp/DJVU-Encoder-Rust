@@ -409,7 +409,7 @@ fn file_type_to_chunk_id(file_type: FileType) -> [u8; 4] {
 }
 
 /// Aligns the writer to an even byte boundary by writing a padding byte if needed.
-fn align_even<W: Write + Seek>(writer: &mut W) -> Result<()> {
+fn _align_even<W: Write + Seek>(writer: &mut W) -> Result<()> {
     let pos = writer.stream_position()?;
     if pos % 2 != 0 {
         writer.write_all(&[0])?;

@@ -48,140 +48,188 @@ impl Default for EncoderParams {
 }
 // (1) helper to go from signed i8 → unbiased u8
 #[inline]
-fn signed_to_unsigned_u8(v: i8) -> u8 { (v as i16 + 128) as u8 }
+fn _signed_to_unsigned_u8(v: i8) -> u8 { (v as i16 + 128) as u8 }
 
-fn convert_signed_buffer_to_grayscale(buf: &[i8], w: u32, h: u32) -> GrayImage {
-    let bytes: Vec<u8> = buf.iter().map(|&v| signed_to_unsigned_u8(v)).collect();
+fn _convert_signed_buffer_to_grayscale(buf: &[i8], w: u32, h: u32) -> GrayImage {
+    let bytes: Vec<u8> = buf.iter().map(|&v| _signed_to_unsigned_u8(v)).collect();
     GrayImage::from_raw(w, h, bytes).expect("Invalid buffer dimensions")
 }
 
-// Fixed-point constants for YCbCr conversion (Rec.601)
-const SCALE: i32 = 1 << 16;
+// fixed-point constants, same as before
+const _SCALE: i32 = 1 << 16;
 const ROUND: i32 = 1 << 15;
 
-// Pre-computed YCbCr conversion tables (computed once)
+// precompute only once
 static YCC_TABLES: OnceLock<([[i32; 256]; 3], [[i32; 256]; 3], [[i32; 256]; 3])> = OnceLock::new();
 
 fn get_ycc_tables() -> &'static ([[i32; 256]; 3], [[i32; 256]; 3], [[i32; 256]; 3]) {
     YCC_TABLES.get_or_init(|| {
-        let mut y_table = [[0i32; 256]; 3];   // [R, G, B] components for Y
-        // Chrominance tables store raw coefficients without the +128 offset.
-        // The bias is applied after summing the R/G/B contributions.
-        let mut cb_table = [[0i32; 256]; 3];  // [R, G, B] components for Cb
-        let mut cr_table = [[0i32; 256]; 3];  // [R, G, B] components for Cr
+        let mut y  = [[0;256]; 3];
+        let mut cb = [[0;256]; 3];
+        let mut cr = [[0;256]; 3];
         
-        for i in 0..256 {
-            let v = i as i32;
+        // Use EXACT coefficients from original DjVu C++ encoder
+        // From IW44EncodeCodec.cpp rgb_to_ycc[3][3] matrix:
+        const RGB_TO_YCC: [[f32; 3]; 3] = [
+            [ 0.304348,  0.608696,  0.086956],  // Y coefficients
+            [ 0.463768, -0.405797, -0.057971],  // Cb coefficients  
+            [-0.173913, -0.347826,  0.521739],  // Cr coefficients
+        ];
+        
+        for k in 0..256 {
+            // Exactly match C++ code: rmul[k] = (int)(k * 0x10000 * rgb_to_ycc[0][0]);
+            y[0][k] = (k as f32 * 65536.0 * RGB_TO_YCC[0][0]) as i32;
+            y[1][k] = (k as f32 * 65536.0 * RGB_TO_YCC[0][1]) as i32;
+            y[2][k] = (k as f32 * 65536.0 * RGB_TO_YCC[0][2]) as i32;
             
-            // Y coefficients (no offset, full 0-255 range)
-            y_table[0][i] = (19595 * v) >> 16;  // 0.299 * 65536
-            y_table[1][i] = (38469 * v) >> 16;  // 0.587 * 65536  
-            y_table[2][i] = (7471 * v) >> 16;   // 0.114 * 65536
+            cb[0][k] = (k as f32 * 65536.0 * RGB_TO_YCC[1][0]) as i32;
+            cb[1][k] = (k as f32 * 65536.0 * RGB_TO_YCC[1][1]) as i32;
+            cb[2][k] = (k as f32 * 65536.0 * RGB_TO_YCC[1][2]) as i32;
             
-            // Cb coefficients (no offset yet)
-            cb_table[0][i] = (-11059 * v) >> 16;  // -0.168736 * 65536
-            cb_table[1][i] = (-21709 * v) >> 16;  // -0.331264 * 65536
-            cb_table[2][i] = (32768 * v) >> 16;   //  0.500000 * 65536
-
-            // Cr coefficients (no offset yet)
-            cr_table[0][i] = (32768 * v) >> 16;   //  0.500000 * 65536
-            cr_table[1][i] = (-27439 * v) >> 16;  // -0.418688 * 65536
-            cr_table[2][i] = (-5329 * v) >> 16;   // -0.081312 * 65536
+            cr[0][k] = (k as f32 * 65536.0 * RGB_TO_YCC[2][0]) as i32;
+            cr[1][k] = (k as f32 * 65536.0 * RGB_TO_YCC[2][1]) as i32;
+            cr[2][k] = (k as f32 * 65536.0 * RGB_TO_YCC[2][2]) as i32;
         }
-        
-        (y_table, cb_table, cr_table)
+        (y, cb, cr)
     })
 }
 
-/// Optimized RGB → YCbCr conversion with pre-computed tables.
-/// Y channel: 0-255 range mapped to signed i8: -128 to +127 (0→-128, 255→+127)
-/// Cb/Cr channels: centered on 0 (stored as signed i8: -128 to +127)
+/// Convert an RGB-buffer (`img_raw`, length must be divisible by 3)
+/// into three signed i8 planes (`out_y`, `out_cb`, `out_cr`).
+pub fn rgb_to_ycbcr_planes(
+    img_raw: &[u8],
+    out_y:   &mut [i8],
+    out_cb:  &mut [i8],
+    out_cr:  &mut [i8],
+) {
+    assert!(img_raw.len() % 3 == 0,   "input length must be a multiple of 3");
+    let npix = img_raw.len() / 3;
+    assert_eq!(out_y.len(),  npix);
+    assert_eq!(out_cb.len(), npix);
+    assert_eq!(out_cr.len(), npix);
+
+    let (y_tbl, cb_tbl, cr_tbl) = get_ycc_tables();
+
+    for (i, chunk) in img_raw.chunks_exact(3).enumerate() {
+        let r = chunk[0] as usize;
+        let g = chunk[1] as usize;
+        let b = chunk[2] as usize;
+
+        // Exactly match C++ code calculation:
+        // int y = rmul[p2->r] + gmul[p2->g] + bmul[p2->b] + 32768;
+        // *out2 = (y >> 16) - 128;
+        
+        let y = y_tbl[0][r] + y_tbl[1][g] + y_tbl[2][b] + 32768;
+        out_y[i] = ((y >> 16) - 128) as i8;
+
+        let cb = cb_tbl[0][r] + cb_tbl[1][g] + cb_tbl[2][b] + 32768;
+        out_cb[i] = ((cb >> 16) - 128) as i8;
+
+        let cr = cr_tbl[0][r] + cr_tbl[1][g] + cr_tbl[2][b] + 32768;
+        out_cr[i] = ((cr >> 16) - 128) as i8;
+    }
+}
+
+/// Convert RgbImage to YCbCr buffers (wrapper for rgb_to_ycbcr_planes)
 pub fn rgb_to_ycbcr_buffers(
     img: &RgbImage,
-    out_y:  &mut [i8],
+    out_y: &mut [i8],
     out_cb: &mut [i8],
     out_cr: &mut [i8],
 ) {
-    let (y_table, cb_table, cr_table) = get_ycc_tables();
-    let pixels: &[[u8;3]] = bytemuck::cast_slice(img.as_raw());
-
+    let pixels: &[[u8; 3]] = bytemuck::cast_slice(img.as_raw());
     assert_eq!(out_y.len(), pixels.len());
     assert_eq!(out_cb.len(), pixels.len());
     assert_eq!(out_cr.len(), pixels.len());
 
-    // Debug sample to check conversion
-    let sample_indices = [0, pixels.len() / 4, pixels.len() / 2, 3 * pixels.len() / 4, pixels.len() - 1];
-    let mut y_samples = Vec::new();
-    let mut cb_samples = Vec::new();
-    let mut cr_samples = Vec::new();
+    // Call the main conversion function
+    rgb_to_ycbcr_planes(img.as_raw(), out_y, out_cb, out_cr);
+}
+/// Convert an `RgbImage` into three signed‐i8 planes (Y, Cb, Cr).
+pub fn ycbcr_from_rgb(img: &RgbImage) -> (Vec<i8>, Vec<i8>, Vec<i8>) {
+    let (w, h) = img.dimensions();
+    let npix = (w * h) as usize;
 
-    // Track min/max values and uniqueness for solid color detection
-    let mut y_min = i8::MAX;
-    let mut y_max = i8::MIN;
-    let mut cb_min = i8::MAX;
-    let mut cb_max = i8::MIN;
-    let mut cr_min = i8::MAX;
-    let mut cr_max = i8::MIN;
-    let mut unique_colors = std::collections::HashSet::new();
+    let mut y_buf  = vec![0i8; npix];
+    let mut cb_buf = vec![0i8; npix];
+    let mut cr_buf = vec![0i8; npix];
 
-    for (i, &[r, g, b]) in pixels.iter().enumerate() {
-        // Track unique RGB values
-        if unique_colors.len() < 10 {  // Only track first 10 unique colors
-            unique_colors.insert((r, g, b));
+    // Re-use your core converter
+    rgb_to_ycbcr_planes(img.as_raw(), &mut y_buf, &mut cb_buf, &mut cr_buf);
+    (y_buf, cb_buf, cr_buf)
+}
+
+/// Build Y/Cb/Cr `Codec`s (or None for chroma) from signed‐i8 planes.
+pub fn make_ycbcr_codecs(
+    y_buf: &[i8],
+    cb_buf: &[i8],
+    cr_buf: &[i8],
+    width: u32,
+    height: u32,
+    mask: Option<&GrayImage>,
+    params: &EncoderParams,
+) -> (Codec, Option<Codec>, Option<Codec>) {
+    // Y is always present
+    let ymap     = CoeffMap::create_from_signed_channel(y_buf, width, height, mask, "Y");
+    let y_codec  = Codec::new(ymap, params);
+
+    // Decide whether to build Cb/Cr
+    let (cb_codec, cr_codec) = match params.crcb_mode {
+        CrcbMode::None => (None, None),
+        CrcbMode::Half | CrcbMode::Normal | CrcbMode::Full => {
+            let mut cbmap = CoeffMap::create_from_signed_channel(cb_buf, width, height, mask, "Cb");
+            let mut crmap = CoeffMap::create_from_signed_channel(cr_buf, width, height, mask, "Cr");
+            if matches!(params.crcb_mode, CrcbMode::Half) {
+                cbmap.slash_res(2);
+                crmap.slash_res(2);
+            }
+            (Some(Codec::new(cbmap, params)), Some(Codec::new(crmap, params)))
         }
+    };
 
-        // Y: full 0-255 range, no centering
-        let y = y_table[0][r as usize] + y_table[1][g as usize] + y_table[2][b as usize];
-        let y_val = y.clamp(0, 255);
-        // Store Y as signed but preserve full 0-255 range by subtracting 128
-        // This maps 0-255 to -128-127, which is the expected format for IW44
-        out_y[i] = (y_val - 128) as i8;
-        
-        // Cb/Cr: sum raw coefficients then apply +128 bias before converting to
-        // signed representation.
-        // Raw chroma values (range roughly [-128,127]). Add the +128 offset
-        // only for the intermediate 8-bit representation if needed; the final
-        // buffers store signed values.
-        let cb_raw = cb_table[0][r as usize] + cb_table[1][g as usize] + cb_table[2][b as usize];
-        let cr_raw = cr_table[0][r as usize] + cr_table[1][g as usize] + cr_table[2][b as usize];
+    (y_codec, cb_codec, cr_codec)
+}
 
-        out_cb[i] = cb_raw.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
-        out_cr[i] = cr_raw.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
-        
-        // Track min/max for debug
-        y_min = y_min.min(out_y[i]);
-        y_max = y_max.max(out_y[i]);
-        cb_min = cb_min.min(out_cb[i]);
-        cb_max = cb_max.max(out_cb[i]);
-        cr_min = cr_min.min(out_cr[i]);
-        cr_max = cr_max.max(out_cr[i]);
-        
-        // Collect samples for debugging
-        if sample_indices.contains(&i) {
-            y_samples.push((r, g, b, y_val, out_y[i]));
-            cb_samples.push(out_cb[i]);
-            cr_samples.push(out_cr[i]);
-        }
-    }
+/// High-level: build an `IWEncoder` straight from RGB.
+pub fn encoder_from_rgb_with_helpers(
+    img: &RgbImage,
+    mask: Option<&GrayImage>,
+    params: EncoderParams,
+) -> Result<IWEncoder, EncoderError> {
+    let (w, h) = img.dimensions();
+    let (y_buf, cb_buf, cr_buf) = ycbcr_from_rgb(img);
+    let (y_codec, cb_codec, cr_codec) =
+        make_ycbcr_codecs(&y_buf, &cb_buf, &cr_buf, w, h, mask, &params);
 
-    // Debug output for color conversion
-    println!("DEBUG RGB→YCbCr conversion:");
-    println!("  Unique RGB colors: {:?}", unique_colors);
-    println!("  Y range: {} to {} (span: {})", y_min, y_max, y_max as i32 - y_min as i32);
-    println!("  Cb range: {} to {} (span: {})", cb_min, cb_max, cb_max as i32 - cb_min as i32);
-    println!("  Cr range: {} to {} (span: {})", cr_min, cr_max, cr_max as i32 - cr_min as i32);
-    println!("  Sample Y conversions: {:?}", y_samples);
-    println!("  Sample Cb values: {:?}", cb_samples);
-    println!("  Sample Cr values: {:?}", cr_samples);
-    
-    // Flag potential solid color
-    let is_likely_solid = unique_colors.len() == 1 || 
-                         (y_max as i32 - y_min as i32 <= 2 && 
-                          cb_max as i32 - cb_min as i32 <= 2 && 
-                          cr_max as i32 - cr_min as i32 <= 2);
-    if is_likely_solid {
-        println!("  *** SOLID COLOR DETECTED - should compress very well! ***");
-    }
+    Ok(IWEncoder {
+        y_codec,
+        cb_codec,
+        cr_codec,
+        params,
+        total_slices: 0,
+        total_bytes: 0,
+        serial: 0,
+    })
+}
+
+/// And a symmetric one for gray:
+pub fn encoder_from_gray_with_helpers(
+    img: &GrayImage,
+    mask: Option<&GrayImage>,
+    params: EncoderParams,
+) -> Result<IWEncoder, EncoderError> {
+    let ymap    = CoeffMap::create_from_image(img, mask);
+    let y_codec = Codec::new(ymap, &params);
+
+    Ok(IWEncoder {
+        y_codec,
+        cb_codec: None,
+        cr_codec: None,
+        params,
+        total_slices: 0,
+        total_bytes: 0,
+        serial: 0,
+    })
 }
 pub struct IWEncoder {
     y_codec: Codec,
@@ -191,7 +239,6 @@ pub struct IWEncoder {
     total_slices: usize,
     total_bytes: usize,
     serial: u8,
-    cur_bit: i32, // Synchronized bit-plane index
 }
 
 impl IWEncoder {
@@ -200,74 +247,17 @@ impl IWEncoder {
         mask: Option<&GrayImage>,
         params: EncoderParams,
     ) -> Result<Self, EncoderError> {
-        let ymap = CoeffMap::create_from_image(img, mask);
-        let y_codec = Codec::new(ymap);
-        let cur_bit = y_codec.cur_bit;
-
-        Ok(IWEncoder {
-            y_codec,
-            cb_codec: None,
-            cr_codec: None,
-            params,
-            total_slices: 0,
-            total_bytes: 0,
-            serial: 0,
-            cur_bit,
-        })
+        encoder_from_gray_with_helpers(img, mask, params)
     }
-
+    
     pub fn from_rgb(
         img: &RgbImage,
         mask: Option<&GrayImage>,
         params: EncoderParams,
     ) -> Result<Self, EncoderError> {
-        let (delay, half) = match params.crcb_mode {
-            CrcbMode::None => (-1, true),
-            CrcbMode::Half => (10, true),
-            CrcbMode::Normal => (10, false),
-            CrcbMode::Full => (0, false),
-        };
-
-        let (width, height) = img.dimensions();
-        let num_pixels = (width * height) as usize;
-        
-        // Convert RGB to YCbCr using the corrected function
-        let mut y_buf = vec![0i8; num_pixels];
-        let mut cb_buf = vec![0i8; num_pixels];
-        let mut cr_buf = vec![0i8; num_pixels];
-        rgb_to_ycbcr_buffers(img, &mut y_buf, &mut cb_buf, &mut cr_buf);
-
-        // Create Y coefficient map directly from signed Y buffer (keeping centered at 0)
-        let ymap = CoeffMap::create_from_signed_channel(&y_buf, width, height, mask, "Y");
-        let y_codec = Codec::new(ymap);
-
-        let (cb_codec, cr_codec) = if delay >= 0 {
-            // Create Cb/Cr coefficient maps directly from signed buffers (keeping centered at 0)
-            let mut cbmap = CoeffMap::create_from_signed_channel(&cb_buf, width, height, mask, "Cb");
-            let mut crmap = CoeffMap::create_from_signed_channel(&cr_buf, width, height, mask, "Cr");
-
-            if half {
-                cbmap.slash_res(2);
-                crmap.slash_res(2);
-            }
-            (Some(Codec::new(cbmap)), Some(Codec::new(crmap)))
-        } else {
-            (None, None)
-        };
-
-        let cur_bit = y_codec.cur_bit;
-
-        Ok(IWEncoder {
-            y_codec,
-            cb_codec,
-            cr_codec,
-            params,
-            total_slices: 0,
-            total_bytes: 0,
-            serial: 0,
-            cur_bit,
-        })
+        encoder_from_rgb_with_helpers(img, mask, params)
     }
+
 
     pub fn encode_chunk(&mut self, max_slices: usize) -> Result<(Vec<u8>, bool), EncoderError> {
         let (w, h) = {
@@ -280,31 +270,41 @@ impl IWEncoder {
             (w, h)
         };
 
-        if self.cur_bit < 0 {
+        // Check if all codecs are finished
+        let all_finished = self.y_codec.cur_bit < 0 && 
+                          self.cb_codec.as_ref().map_or(true, |c| c.cur_bit < 0) &&
+                          self.cr_codec.as_ref().map_or(true, |c| c.cur_bit < 0);
+        
+        if all_finished {
             return Ok((Vec::new(), false));
         }
 
         let mut chunk_data = Vec::new();
         let mut zp = ZEncoder::new(Cursor::new(Vec::new()), true)?;
 
-        // Synchronize bit-planes across components
-        self.y_codec.cur_bit = self.cur_bit;
-        if let Some(ref mut cb) = self.cb_codec {
-            cb.cur_bit = self.cur_bit;
-        }
-        if let Some(ref mut cr) = self.cr_codec {
-            cr.cur_bit = self.cur_bit;
-        }
-
         let mut slices_encoded = 0;
-        let initial_bytes = self.total_bytes;
+        let _initial_bytes = self.total_bytes;
         
         // Encode slices according to DjVu spec: multiple slices per chunk
         // Each "slice" is one logical unit containing color bands for active components
-        while slices_encoded < max_slices && self.cur_bit >= 0 {
+        // Each codec maintains its own cur_bit and progresses independently
+        while slices_encoded < max_slices {
+            // Check if any codec still has data to encode
+            let any_active = self.y_codec.cur_bit >= 0 || 
+                           self.cb_codec.as_ref().map_or(false, |c| c.cur_bit >= 0) ||
+                           self.cr_codec.as_ref().map_or(false, |c| c.cur_bit >= 0);
+            
+            if !any_active {
+                break;
+            }
+            
             // A DjVu "slice" contains one color band for each active component
-            // Encode Y component (always present)
-            let y_has_data = self.y_codec.encode_slice(&mut zp)?;
+            // Encode Y component if it still has data
+            let y_has_data = if self.y_codec.cur_bit >= 0 {
+                self.y_codec.encode_slice(&mut zp)?
+            } else {
+                false
+            };
             
             // Handle chrominance components based on delay
             let crcb_delay = match self.params.crcb_mode {
@@ -312,35 +312,50 @@ impl IWEncoder {
                 _ => 0,
             };
             
+            let mut cb_has_data = false;
+            let mut cr_has_data = false;
+            
             if let (Some(ref mut cb), Some(ref mut cr)) = (&mut self.cb_codec, &mut self.cr_codec) {
                 if self.total_slices >= crcb_delay {
-                    cb.encode_slice(&mut zp)?;
-                    cr.encode_slice(&mut zp)?;
-                }
-            }
-            
-            // Only count this as a slice if we encoded meaningful data
-            if y_has_data {
-                slices_encoded += 1;
-                self.total_slices += 1;
-                
-                // Synchronize cur_bit from Y codec (it manages band progression)
-                self.cur_bit = self.y_codec.cur_bit;
-                
-                // Sync chrominance codecs if they exist
-                if let Some(ref mut cb) = self.cb_codec {
-                    cb.cur_bit = self.cur_bit;
-                }
-                if let Some(ref mut cr) = self.cr_codec {
-                    cr.cur_bit = self.cur_bit;
+                    #[cfg(debug_assertions)]
+                    {
+                        eprintln!("DEBUG: Encoding Cb/Cr slices (total_slices={}, delay={})", self.total_slices, crcb_delay);
+                        eprintln!("DEBUG: Before encoding - Y cur_bit: {}, Cb cur_bit: {}, Cr cur_bit: {}", 
+                                 self.y_codec.cur_bit, cb.cur_bit, cr.cur_bit);
+                    }
+                    
+                    // Encode Cb if it still has data
+                    if cb.cur_bit >= 0 {
+                        cb_has_data = cb.encode_slice(&mut zp)?;
+                    }
+                    
+                    // Encode Cr if it still has data
+                    if cr.cur_bit >= 0 {
+                        cr_has_data = cr.encode_slice(&mut zp)?;
+                    }
+                    
+                    #[cfg(debug_assertions)]
+                    {
+                        eprintln!("DEBUG: After encoding - Y cur_bit: {}, Cb cur_bit: {}, Cr cur_bit: {}", 
+                                 self.y_codec.cur_bit, cb.cur_bit, cr.cur_bit);
+                        eprintln!("DEBUG: Y has data: {}, Cb has data: {}, Cr has data: {}", y_has_data, cb_has_data, cr_has_data);
+                    }
+                } else {
+                    #[cfg(debug_assertions)]
+                    eprintln!("DEBUG: Skipping Cb/Cr due to delay (total_slices={} < delay={})", self.total_slices, crcb_delay);
                 }
             } else {
-                // No meaningful data encoded, we're probably done
-                break;
+                #[cfg(debug_assertions)]
+                eprintln!("DEBUG: No Cb/Cr codecs available");
             }
             
-            // Break if we've exhausted all bit-planes
-            if self.cur_bit < 0 {
+            // Only count this as a slice if we encoded meaningful data from ANY component
+            if y_has_data || cb_has_data || cr_has_data {
+                slices_encoded += 1;
+                self.total_slices += 1;
+            } else {
+                // No meaningful data encoded from any component in this iteration
+                // This can happen when all codecs have progressed past their useful bit-planes
                 break;
             }
         }
@@ -393,12 +408,16 @@ impl IWEncoder {
         self.serial = self.serial.wrapping_add(1);
         self.total_bytes += chunk_data.len();
 
-        println!("DEBUG: Writing IW44 chunk {}, {} slices, {} bytes", 
+        #[cfg(debug_assertions)]
+        eprintln!("DEBUG: Writing IW44 chunk {}, {} slices, {} bytes", 
                  self.serial - 1, slices_encoded, chunk_data.len());
         
         // Determine if there are more slices to emit
-        // 'more' is true if we hit the max_slices for this chunk AND there are more bit-planes to process
-        let more = self.cur_bit >= 0 && slices_encoded == max_slices;
+        // 'more' is true if we hit the max_slices for this chunk AND any codec still has data to process
+        let any_codec_active = self.y_codec.cur_bit >= 0 || 
+                              self.cb_codec.as_ref().map_or(false, |c| c.cur_bit >= 0) ||
+                              self.cr_codec.as_ref().map_or(false, |c| c.cur_bit >= 0);
+        let more = any_codec_active && slices_encoded == max_slices;
         Ok((chunk_data, more))
     }
 }

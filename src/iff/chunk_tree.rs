@@ -247,6 +247,7 @@ impl IffDocument {
         let files_list = dir_model.get_files_list();
         for file in files_list {
             let file_id = &file.id;
+            #[allow(unused_assignments)]
             let mut chunk_id_buf = [0u8; 4];
             let chunk_id_str = if file.file_type == DirFileType::Page {
                 "FORM:DJVU"

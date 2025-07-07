@@ -36,7 +36,7 @@ const TOTAL_CONTEXTS: u32 = RECORD_STREAM_NC_BASE + RECORD_STREAM_NC_CONTEXTS;
 
 /// The main JB2 encoder.
 pub struct JB2Encoder<W: Write> {
-    writer: W,
+    _writer: W,
     sym_dict_encoder: SymDictEncoder,
     dictionary: Vec<BitImage>,
 }
@@ -47,7 +47,7 @@ impl<W: Write> JB2Encoder<W> {
         let sym_dict_encoder =
             SymDictEncoder::new(SYM_DICT_NC_BASE, SYM_DICT_NC_CONTEXTS, DIRECT_BITMAP_BASE);
         Self {
-            writer,
+            _writer: writer,
             sym_dict_encoder,
             dictionary: Vec::new(),
         }

@@ -171,6 +171,8 @@ pub fn forward_mask(
         }
 
         // reconstruct back to pixel domain (inverse IW44 transform would be called here in reference impl, but is not implemented in encoder)
+        // NOTE: Encode::backward is not implemented in Rust encoder, and is not needed for encoding-only pipeline.
+
         // restore visible pixels so they remain exact
         for y in (0..h).step_by(scale) {
             for x in (0..w).step_by(scale) {

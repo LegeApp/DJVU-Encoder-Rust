@@ -398,7 +398,7 @@ impl PageComponents {
     }
 
     /// Encodes the foreground using JB2
-    fn encode_jb2_foreground(
+    fn _encode_jb2_foreground(
         &self,
         img: &BitImage,
         writer: &mut IffWriter,
@@ -422,7 +422,7 @@ impl PageComponents {
     }
 
     /// Encodes the mask using JB2
-    fn encode_jb2_mask(&self, img: &BitImage, writer: &mut IffWriter) -> Result<()> {
+    fn _encode_jb2_mask(&self, img: &BitImage, writer: &mut IffWriter) -> Result<()> {
         // Create JB2 encoder and encode
         let mut jb2_encoder = JB2Encoder::new(Vec::new());
         let jb2_raw = jb2_encoder.encode_page(img, 0)?;

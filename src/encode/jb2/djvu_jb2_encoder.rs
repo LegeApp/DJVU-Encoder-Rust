@@ -39,6 +39,7 @@ const TOTAL_CONTEXTS: usize = REFINEMENT_BITMAP_BASE_CONTEXT + REFINEMENT_BITMAP
 
 // Record types as per DjVu specification Table 6
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 enum RecordType {
     StartOfImage = 0,
     NewSymbolAddToImageAndLibrary = 1,
@@ -56,20 +57,20 @@ enum RecordType {
 
 /// DjVu-compatible JB2 encoder
 pub struct DjvuJb2Encoder<W: Write> {
-    writer: W,
+    _writer: W,
     image_width: u32,
     image_height: u32,
-    symbol_library: Vec<BitImage>,
+    _symbol_library: Vec<BitImage>,
 }
 
 impl<W: Write> DjvuJb2Encoder<W> {
     /// Create a new DjVu JB2 encoder
     pub fn new(writer: W) -> Self {
         Self {
-            writer,
+            _writer: writer,
             image_width: 0,
             image_height: 0,
-            symbol_library: Vec::new(),
+            _symbol_library: Vec::new(),
         }
     }
 

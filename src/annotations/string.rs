@@ -7,7 +7,7 @@ pub trait DjvuStrExt {
     fn from_escaped(&self) -> String;
     fn to_int(&self) -> Result<i64, ParseIntError>;
     fn to_float(&self) -> Result<f64, std::num::ParseFloatError>;
-    fn substr(&self, from: i32, len: Option<u32>) -> Cow<str>;
+    fn substr(&self, from: i32, len: Option<u32>) -> Cow<'_, str>;
 }
 
 impl DjvuStrExt for str {
@@ -75,7 +75,7 @@ impl DjvuStrExt for str {
         self.trim().parse::<f64>()
     }
 
-    fn substr(&self, from: i32, len: Option<u32>) -> Cow<str> {
+    fn substr(&self, from: i32, len: Option<u32>) -> Cow<'_, str> {
         let char_count = self.chars().count();
         if char_count == 0 {
             return Cow::Borrowed("");

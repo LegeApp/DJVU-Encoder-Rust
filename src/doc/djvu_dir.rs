@@ -340,7 +340,7 @@ impl DjVmDir {
         &self,
         stream: &mut dyn ByteStream,
         bundled: bool,
-        do_rename: bool,
+        _do_rename: bool,
     ) -> Result<()> {
         let data = self.data.lock().unwrap();
 

@@ -51,7 +51,7 @@ fn get_direct_context_image(image: &BitImage, x: i32, y: i32) -> usize {
 /// This function safely handles boundary conditions by treating any pixel
 /// outside the image as white (false).
 #[inline]
-fn get_refinement_context(
+fn _get_refinement_context(
     current: &BitImage,
     reference: &BitImage,
     x: i32,

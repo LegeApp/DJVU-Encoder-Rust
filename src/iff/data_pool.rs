@@ -203,7 +203,7 @@ impl DataPool {
     #[inline]
     /// Executes a closure with a mutable reference to the underlying `DataSource`.
     /// This is an internal helper for operations that need to modify the source, like `Write`.
-    fn with_data_mut<F, R>(&mut self, f: F) -> R
+    fn _with_data_mut<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce(&mut dyn DataSource) -> R,
     {

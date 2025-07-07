@@ -96,23 +96,22 @@ impl<W: Write> BsEncoder<W> {
         self.encode_raw(24, size)?;
 
         // Determine and encode estimation speed
-        let mut fshift = 0;
         let mut fshift_ctx: BitContext = 0; // Create real context instead of literal
-        if size < FREQS0 {
-            fshift = 0;
+        let fshift = if size < FREQS0 {
             println!("DEBUG BZZ: Using fshift=0 (size {} < {})", size, FREQS0);
             self.zp_encoder.encode(false, &mut fshift_ctx)?;
+            0
         } else if size < FREQS1 {
-            fshift = 1;
             println!("DEBUG BZZ: Using fshift=1 (size {} < {})", size, FREQS1);
             self.zp_encoder.encode(true, &mut fshift_ctx)?;
             self.zp_encoder.encode(false, &mut fshift_ctx)?;
+            1
         } else {
-            fshift = 2;
             println!("DEBUG BZZ: Using fshift=2 (size {} >= {})", size, FREQS1);
             self.zp_encoder.encode(true, &mut fshift_ctx)?;
             self.zp_encoder.encode(true, &mut fshift_ctx)?;
-        }
+            2
+        };
 
         // Initialize Move-to-Front (MTF) tables
         let mut mtf: Vec<u8> = (0..=255).collect();
@@ -151,7 +150,7 @@ impl<W: Write> BsEncoder<W> {
             self.zp_encoder
                 .encode(bit, &mut contexts[cx_idx + ctxid as usize])?;
             if bit {
-                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
+                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift as u8);
                 continue;
             }
 
@@ -160,7 +159,7 @@ impl<W: Write> BsEncoder<W> {
             self.zp_encoder
                 .encode(bit, &mut contexts[cx_idx + ctxid as usize])?;
             if bit {
-                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
+                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift as u8);
                 continue;
             }
 
@@ -169,7 +168,7 @@ impl<W: Write> BsEncoder<W> {
             self.zp_encoder.encode(bit, &mut contexts[cx_idx])?;
             if bit {
                 self.encode_binary(&mut contexts[cx_idx + 1..], 1, mtfno_current - 2)?;
-                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
+                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift as u8);
                 continue;
             }
 
@@ -178,7 +177,7 @@ impl<W: Write> BsEncoder<W> {
             self.zp_encoder.encode(bit, &mut contexts[cx_idx])?;
             if bit {
                 self.encode_binary(&mut contexts[cx_idx + 1..], 2, mtfno_current - 4)?;
-                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
+                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift as u8);
                 continue;
             }
 
@@ -187,7 +186,7 @@ impl<W: Write> BsEncoder<W> {
             self.zp_encoder.encode(bit, &mut contexts[cx_idx])?;
             if bit {
                 self.encode_binary(&mut contexts[cx_idx + 1..], 3, mtfno_current - 8)?;
-                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
+                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift as u8);
                 continue;
             }
 
@@ -196,7 +195,7 @@ impl<W: Write> BsEncoder<W> {
             self.zp_encoder.encode(bit, &mut contexts[cx_idx])?;
             if bit {
                 self.encode_binary(&mut contexts[cx_idx + 1..], 4, mtfno_current - 16)?;
-                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
+                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift as u8);
                 continue;
             }
 
@@ -205,7 +204,7 @@ impl<W: Write> BsEncoder<W> {
             self.zp_encoder.encode(bit, &mut contexts[cx_idx])?;
             if bit {
                 self.encode_binary(&mut contexts[cx_idx + 1..], 5, mtfno_current - 32)?;
-                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
+                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift as u8);
                 continue;
             }
 
@@ -214,7 +213,7 @@ impl<W: Write> BsEncoder<W> {
             self.zp_encoder.encode(bit, &mut contexts[cx_idx])?;
             if bit {
                 self.encode_binary(&mut contexts[cx_idx + 1..], 6, mtfno_current - 64)?;
-                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
+                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift as u8);
                 continue;
             }
 
@@ -223,12 +222,12 @@ impl<W: Write> BsEncoder<W> {
             self.zp_encoder.encode(bit, &mut contexts[cx_idx])?;
             if bit {
                 self.encode_binary(&mut contexts[cx_idx + 1..], 7, mtfno_current - 128)?;
-                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
+                self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift as u8);
                 continue;
             }
 
             // Marker position (mtfno == 256)
-            self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift);
+            self.rotate_mtf(&mut mtf, &mut rmtf, &mut freq, c, fadd, fshift as u8);
         }
 
         Ok(())

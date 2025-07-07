@@ -50,7 +50,7 @@ impl RelLocPredictor {
     }
 
     /// Predicts the location of a symbol based on its context
-    pub fn predict(&self, x: i32, y: i32, _sym_id: usize, _dictionary: &[BitImage]) -> (i32, i32) {
+    pub fn predict(&self, _x: i32, _y: i32, _sym_id: usize, _dictionary: &[BitImage]) -> (i32, i32) {
         // Simple prediction: use the last seen position
         (self.last_x, self.last_y)
     }
