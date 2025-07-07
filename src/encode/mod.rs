@@ -1,4 +1,5 @@
 pub mod iw44;
+// pub mod iw44_ffi;  // FFI-based IW44 encoder - disabled for now
 pub mod jb2;
 pub mod zc;
 

@@ -9,6 +9,7 @@
 pub mod annotations;
 pub mod doc;
 pub mod encode;
+pub mod ffi;
 pub mod iff;
 pub mod image;
 pub mod utils;

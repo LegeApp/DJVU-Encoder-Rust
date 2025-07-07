@@ -1,6 +1,9 @@
 // src/encode/iw44/encoder.rs
 
+#[cfg(not(feature = "ffi_codec"))]
 use super::codec::Codec;
+#[cfg(feature = "ffi_codec")]
+use super::ffi_codec::FfiCodec as Codec;
 use super::coeff_map::CoeffMap;
 use crate::encode::zc::ZEncoder;
 use ::image::{GrayImage, RgbImage};
@@ -323,42 +326,19 @@ impl IWEncoder {
                 false
             };
             
-            // Handle chrominance components based on delay
-            let crcb_delay = match self.params.crcb_mode {
-                CrcbMode::Half | CrcbMode::Normal => 10,
-                _ => 0,
-            };
-            
+            // CORRECTED: Unconditionally encode Cb and Cr if the codecs exist and are active.
+            // The faulty delay logic has been removed.
             let mut cb_has_data = false;
-            let mut cr_has_data = false;
+            if let Some(ref mut cb) = &mut self.cb_codec {
+                if cb.cur_bit >= 0 {
+                    cb_has_data = cb.encode_slice(&mut zp)?;
+                }
+            }
             
-            if let (Some(ref mut cb), Some(ref mut cr)) = (&mut self.cb_codec, &mut self.cr_codec) {
-                if self.total_slices >= crcb_delay {
-                    // Only show debug for first few slices to avoid flooding
-                    #[cfg(debug_assertions)]
-                    if self.total_slices < crcb_delay + 5 {
-                        debug!("Encoding Cb/Cr slices (total_slices={}, delay={})", self.total_slices, crcb_delay);
-                    }
-                    
-                    // Encode Cb if it still has data
-                    if cb.cur_bit >= 0 {
-                        cb_has_data = cb.encode_slice(&mut zp)?;
-                    }
-                    
-                    // Encode Cr if it still has data
-                    if cr.cur_bit >= 0 {
-                        cr_has_data = cr.encode_slice(&mut zp)?;
-                    }
-                    
-                    #[cfg(debug_assertions)]
-                    if self.total_slices < crcb_delay + 5 {
-                        debug!("Y has data: {}, Cb has data: {}, Cr has data: {}", y_has_data, cb_has_data, cr_has_data);
-                    }
-                } else {
-                    #[cfg(debug_assertions)]
-                    if self.total_slices < 5 {
-                        debug!("Skipping Cb/Cr due to delay (total_slices={} < delay={})", self.total_slices, crcb_delay);
-                    }
+            let mut cr_has_data = false;
+            if let Some(ref mut cr) = &mut self.cr_codec {
+                if cr.cur_bit >= 0 {
+                    cr_has_data = cr.encode_slice(&mut zp)?;
                 }
             }
             
@@ -406,12 +386,8 @@ impl IWEncoder {
             // Image height (2 bytes, big endian)
             chunk_data.extend_from_slice(&(h as u16).to_be_bytes());
             
-            // Chrominance delay counter (1 byte)
-            let delay = match self.params.crcb_mode {
-                CrcbMode::Half | CrcbMode::Normal => 10,
-                _ => 0,
-            } as u8;
-            chunk_data.push(0x80 | (delay & 0x7F)); // MSB set to 1 as per spec
+            // Chrominance delay counter (1 byte) - set to 0 since we encode all components immediately
+            chunk_data.push(0x80); // MSB set to 1 as per spec, delay = 0
         }
 
         // Append the ZP-encoded slice data

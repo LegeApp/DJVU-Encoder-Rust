@@ -9,6 +9,7 @@ pub mod codec;
 pub mod coeff_map;
 pub mod constants;
 pub mod encoder;
+pub mod ffi_codec;  // New FFI-based codec
 pub mod masking;
 pub mod transform;
 pub mod zigzag;
