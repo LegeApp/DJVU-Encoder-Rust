@@ -17,8 +17,8 @@ mod tests;
 
 // Re-export commonly used types and functions
 pub use codec::*;
+pub use coeff_map::*;
 pub use constants::*;
 pub use encoder::*;
 pub use masking::*;
-pub use encoder::*;
 pub use zigzag::{get_zigzag_loc, get_zigzag_loc_checked, ZIGZAG_LOC};

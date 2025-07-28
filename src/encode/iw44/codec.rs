@@ -1,512 +1,439 @@
 // src/encode/iw44/codec.rs
 
-use crate::encode::iw44::coeff_map::{CoeffMap, Block};
-use crate::encode::iw44::constants::{BAND_BUCKETS, IW_QUANT};
-use crate::encode::zc::ZEncoder;
-use crate::Result;
+use super::{coeff_map::CoeffMap, constants::{BAND_BUCKETS, IW_NORM}};
+use crate::encode::zc::{ZEncoder, BitContext};
+use std::f32;
 use std::io::Write;
-use anyhow::Context;
-use log::{debug, info, warn, error};
 
-// Coefficient states
-pub const ZERO: u8 = 1;
-pub const ACTIVE: u8 = 2;
-pub const NEW: u8 = 4;
-pub const UNK: u8 = 8;
 
+// State flags for coefficients and buckets
+const UNK: u8 = 0x01;    // Unknown state
+/// Coefficient state flags
+const NEW: u8 = 0x02;    // New coefficient to be encoded
+const ACTIVE: u8 = 0x04; // Active coefficient (already encoded)
+const ZERO: u8 = 0x00;   // Zero state (coefficient not significant)
+
+/// Context number used by the DjVu reference for "raw" (non-adaptive) bits
+const RAW_CONTEXT_ID: BitContext = 129;
+const RAW_CONTEXT_129: BitContext = 129;
+
+/// 1 bit / coefficient (32 × smaller than `Vec<bool>`)
+const WORD_BITS: usize = 32;
+
+#[inline]
+fn words_for_coeffs(n: usize) -> usize { (n + WORD_BITS - 1) / WORD_BITS }
+
+/// Represents the IW44 codec for encoding wavelet coefficients.
+/// Note: State management (cur_bit, cur_band) has been moved to IWEncoder for synchronization.
 pub struct Codec {
-    pub map: CoeffMap,        // Input coefficients
-    pub emap: CoeffMap,       // Encoded coefficients
-    pub cur_band: usize,      // Current band index
-    pub cur_bit: i32,         // Current bit-plane (decrements)
-    pub quant_hi: [i32; 10],  // High-frequency quantization thresholds
-    pub quant_lo: [i32; 16],  // Low-frequency quantization thresholds
-    coeff_state: [u8; 256],   // Coefficient states per block
-    bucket_state: [u8; 16],   // Bucket states
-    ctx_start: [u8; 32],      // Context for Z-Encoder
-    ctx_bucket: [[u8; 8]; 10], // Bucket contexts
-    ctx_mant: u8,             // Mantissa context
-    ctx_root: u8,             // Root context
+    pub map: CoeffMap,           // Original coefficient map
+    pub emap: CoeffMap,          // Encoded coefficient map
+    pub coeff_state: Vec<u8>,    // State of each coefficient
+    pub bucket_state: Vec<u8>,   // State of each bucket
+    pub quant_hi: [i32; 10],     // Quantization thresholds for bands 1-9
+    pub quant_lo: [i32; 16],     // Quantization thresholds for band 0
+    pub ctx_root: BitContext,     // Context for root bit
+    pub ctx_bucket: Vec<Vec<BitContext>>, // Contexts for bucket bits [band][ctx]
+    pub ctx_start: Vec<BitContext>, // Contexts for new coefficient activation [ctx]
+    pub ctx_mant: BitContext,      // Context for mantissa bits
+    pub signif: Vec<u32>,        // 1 bit / coefficient (1 == coefficient is already significant)
 }
 
 impl Codec {
-    /// Initialize a new Codec instance for a given coefficient map
-    pub fn new(map: CoeffMap, params: &super::encoder::EncoderParams) -> Self {
-        let (iw, ih) = (map.iw, map.ih);
-        
-        // Find maximum coefficient value to determine starting bit-plane
-        let mut max_coeff = 0i32;
-        let mut total_coeffs = 0;
-        let mut nonzero_coeffs = 0;
-        for (block_idx, block) in map.blocks.iter().enumerate() {
-            for bucket_idx in 0..64 {
-                if let Some(bucket) = block.get_bucket(bucket_idx) {
-                    for &coeff in bucket {
-                        total_coeffs += 1;
-                        if coeff != 0 {
-                            nonzero_coeffs += 1;
-                            max_coeff = max_coeff.max((coeff as i32).abs());
-                            if block_idx == 0 && bucket_idx == 0 {
-                                debug!("MAXCOEFF_DEBUG: Block 0, bucket 0, coeff={}, current max_coeff={}", coeff, max_coeff);
-                            }
-                        }
-                    }
-                }
+    /// Creates a new Codec instance for the given coefficient map and parameters.
+    pub fn new(map: CoeffMap, _params: &super::EncoderParams) -> Self {
+        let num_blocks = map.num_blocks;
+        let max_buckets = 64; // Each block has up to 64 buckets
+        let max_coeffs_per_bucket = 16;
+
+        // Initialize quantization thresholds based on IW_QUANT values
+        // For bands 1-9, use the corresponding IW_QUANT values
+        let mut quant_hi = [0i32; 10];
+        quant_hi[0] = 0x8000; // Band 0 uses individual quant_lo values
+        for i in 1..10 {
+            if i < super::constants::IW_QUANT.len() {
+                quant_hi[i] = super::constants::IW_QUANT[i];
+            } else {
+                quant_hi[i] = 0x8000; // fallback
             }
         }
-        debug!("MAXCOEFF_DEBUG: Processed {} total coeffs, {} non-zero, max_coeff={}", total_coeffs, nonzero_coeffs, max_coeff);
+        let quant_lo = super::constants::IW_QUANT; // From constants.rs
 
-        // Debug: Show DC coefficient values for debugging solid color issue
-        if map.blocks.len() > 0 {
-            if let Some(dc_bucket) = map.blocks[0].get_bucket(0) {
-                info!("SOLID_COLOR_DEBUG: DC coefficients in block 0, bucket 0: {:?}", dc_bucket);
-                // Show all block 0 coefficients for comparison
-                for bucket_idx in 0..16 {
-                    if let Some(bucket) = map.blocks[0].get_bucket(bucket_idx) {
-                        let non_zero: Vec<i16> = bucket.iter().filter(|&&x| x != 0).cloned().collect();
-                        if !non_zero.is_empty() {
-                            info!("SOLID_COLOR_DEBUG: Block 0, bucket {}: non-zero coeffs: {:?}", bucket_idx, non_zero);
-                        }
-                    }
-                }
-            }
+        // Initialize contexts
+        let mut ctx_bucket = Vec::with_capacity(10);
+        for _ in 0..10 {
+            ctx_bucket.push(vec![0u8; 8]); // 8 contexts per band (0-7)
         }
+        let ctx_start = vec![0u8; 16]; // 16 contexts (0-15)
 
-        let mut codec = Codec {
-            emap: CoeffMap::new(iw, ih),
+        let coeffs = num_blocks * max_buckets * max_coeffs_per_bucket;
+
+        Codec {
+            emap: CoeffMap::new(map.iw, map.ih), // Encoded map starts empty
             map,
-            cur_band: 0,
-            cur_bit: 15, // Will be updated below
-            quant_hi: [0; 10],
-            quant_lo: [0; 16],
-            coeff_state: [0; 256],
-            bucket_state: [0; 16],
-            ctx_start: [0; 32],
-            ctx_bucket: [[0; 8]; 10],
-            ctx_mant: 0,
-            ctx_root: 0,
-        };
-
-        // Initialize quantization thresholds from IW_QUANT with quality scaling
-        // Apply quality scaling based on params.decibels
-        let quality_scale = if let Some(db) = params.decibels {
-            // Convert decibels to quality scale factor (similar to JPEG quality)
-            // Higher dB = higher quality = less quantization
-            let normalized_db = (db - 50.0) / 50.0; // Normalize around 50dB
-            2.0_f32.powf(-normalized_db) // Exponential scaling
-        } else {
-            1.0 // Default scaling
-        };
-        
-        // CORRECTED: Apply quality scaling to ALL quantization thresholds
-        // Initialize both quant_lo and quant_hi with the same scaled values
-        for i in 0..16 {
-            let step = (IW_QUANT[i] as f32 * quality_scale).max(1.0);
-            codec.quant_lo[i] = step as i32;
+            coeff_state: vec![ZERO; num_blocks * max_buckets * max_coeffs_per_bucket],
+            bucket_state: vec![ZERO; num_blocks * max_buckets],
+            quant_hi,
+            quant_lo,
+            ctx_root: 0u8,
+            ctx_bucket,
+            ctx_start,
+            ctx_mant: 0u8,
+            signif: vec![0; words_for_coeffs(coeffs)],
         }
-
-        for j in 0..10 {
-            let step_size_idx = j.min(15); // Bands 0-9 use indices 0-9, clamped to 15
-            let step = (IW_QUANT[step_size_idx] as f32 * quality_scale).max(1.0);
-            codec.quant_hi[j] = step as i32;
-        }
-
-        // Start from the highest bit-plane that contains information
-        // Recompute based on the scaled step size, not the raw coefficient peak
-        codec.cur_bit = if max_coeff > 0 {
-            // Use the largest scaled quantization step size to determine starting bit-plane
-            let max_step = codec.quant_lo.iter().chain(codec.quant_hi.iter()).max().unwrap_or(&1);
-            let effective_max = (max_coeff as f32 / quality_scale).max(1.0) as i32;
-            effective_max.ilog2() as i32
-        } else {
-            0 // For empty images, start at bit-plane 0
-        };
-
-        // DEBUG PRINT 3: During Codec Initialization
-        println!("DEBUG: Codec init: total_coeffs={}, nonzero_coeffs={}, max_coeff={}, cur_bit={}", 
-                 total_coeffs, nonzero_coeffs, max_coeff, codec.cur_bit);
-
-        #[cfg(debug_assertions)]
-        {
-            info!("XXXXXXXXX CODEC NEW DEBUG XXXXXXXXX");
-            info!("DEBUG Codec quantization thresholds (quality scale: {:.3}):", quality_scale);
-            info!("  Max coefficient: {}", max_coeff);
-            info!("  Starting bit-plane: {}", codec.cur_bit);
-            info!("  quant_lo (band 0): {:?}", &codec.quant_lo[0..4]);
-            info!("  quant_hi (bands 1-9): {:?}", &codec.quant_hi[1..5]);
-        }
-
-        codec
     }
 
-    /// Encode a single slice (current band at current bit-plane)
-    pub fn encode_slice<W: Write>(&mut self, zp: &mut ZEncoder<W>) -> Result<bool> {
-        
-        if self.cur_bit < 0 {
-            return Ok(false); // No more bit-planes to process
+    /// Returns a reference to the coefficient map.
+    pub fn map(&self) -> &CoeffMap {
+        &self.map
+    }
+
+    fn debug_log(&self, msg: &str) {
+        // Write to debug file instead of console
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("codec_debug.log") {
+            let _ = writeln!(file, "CODEC_DEBUG: {}", msg);
+        }
+    }
+
+    #[inline] 
+    fn is_signif(&self, idx: usize) -> bool {
+        (self.signif[idx / WORD_BITS] >> (idx % WORD_BITS)) & 1 != 0
+    }
+    
+    #[inline] 
+    fn mark_signif(&mut self, idx: usize) {
+        self.signif[idx / WORD_BITS] |= 1 << (idx % WORD_BITS);
+    }
+
+    /// Quickly scans if there is any work to be done for a given (bit, band) slice.
+    /// Returns true if at least one coefficient is either NEW or ACTIVE.
+    /// This is much faster than the full two-pass approach as it returns immediately
+    /// upon finding the first instance of activity.
+    pub fn scan_for_activity(&self, bit: i32, band: i32) -> bool {
+        if bit < 0 {
+            return false;
         }
 
-        // Check if this slice contains any significant data
-        let is_null = self.is_null_slice(self.cur_bit as usize, self.cur_band);
-        
-        // Debug current encoding state (only for first few slices to avoid flooding)
-        #[cfg(debug_assertions)]
-        if self.cur_bit > 10 || (self.cur_band == 0 && self.cur_bit > 8) {
-            let threshold = if self.cur_band == 0 {
-                (self.quant_lo[0] >> self.cur_bit).max(1)
-            } else {
-                (self.quant_hi[self.cur_band] >> self.cur_bit).max(1)
-            };
-            debug!("Encode slice: band={}, bit={}, threshold={}, is_null={}", 
-                self.cur_band, self.cur_bit, threshold, is_null);
-        }
-        
-        // If slice is null, we can advance state and continue
-        if is_null {
-            #[cfg(debug_assertions)]
-            if self.cur_bit > 10 || (self.cur_band == 0 && self.cur_bit > 8) {
-                debug!("Slice is null, advancing to next (band={}, bit={})", self.cur_band, self.cur_bit);
+        let band = band as usize;
+        let thresh_hi = (self.quant_hi[band] >> bit).max(1);
+        let bucket_info = BAND_BUCKETS[band];
+
+        for blockno in 0..self.map.num_blocks {
+            let coeff_base_idx = blockno * 64 * 16;
+            for bucket_offset in 0..bucket_info.size {
+                let bucket_idx = bucket_info.start + bucket_offset;
+                
+                // Check for ACTIVE coefficients (already significant)
+                for i in 0..16 {
+                    let gidx = coeff_base_idx + bucket_idx * 16 + i;
+                    if self.is_signif(gidx) {
+                        return true; // Found an active coefficient, slice has data
+                    }
+                }
+                
+                // Check for NEW coefficients
+                if let Some(coeffs) = self.map.blocks[blockno].get_bucket(bucket_idx as u8) {
+                    for i in 0..16 {
+                        let step = if band == 0 {
+                            (self.quant_lo[i] >> bit).max(1)
+                        } else {
+                            thresh_hi
+                        };
+                        if (coeffs[i] as i32).abs() >= (step + 1) / 2 {
+                            return true; // Found a new significant coefficient
+                        }
+                    }
+                }
             }
-            let _has_more = self.finish_code_slice()?;
-            // Return false to indicate no data was encoded in this slice
+        }
+
+        false // Scanned everything, the slice is truly null
+    }
+
+    /// This is the encode_slice implementation - temporarily removing slice activity optimization
+    pub fn encode_slice<W: Write>(
+        &mut self,
+        zp: &mut ZEncoder<W>,
+        bit: i32,
+        band: i32,
+    ) -> Result<bool, super::EncoderError> {
+        if bit < 0 {
             return Ok(false);
         }
 
-        // DEBUG PRINT 4: During Slice Encoding (when slice is not null)
-        println!("DEBUG: Encoding slice: band={}, bit={}", self.cur_band, self.cur_bit);
-
-        debug!("Slice not null - proceeding to bucket encoding band={} bit={}", self.cur_band, self.cur_bit);
+        // Skip the slice activity optimization for now - go directly to block encoding
+        let fbucket = BAND_BUCKETS[band as usize].start;
+        let nbucket = BAND_BUCKETS[band as usize].size;
 
         for blockno in 0..self.map.num_blocks {
-            let bucket_info = BAND_BUCKETS[self.cur_band];
-            
-            // Extract the blocks we need to avoid borrowing issues
-            let input_block = &self.map.blocks[blockno];
-            let output_block = &mut self.emap.blocks[blockno];
-            
-            // Call encode_buckets as a static function to avoid borrowing self
-            Self::encode_buckets_static(
-                zp,
-                self.cur_bit as usize,
-                self.cur_band,
-                input_block,
-                output_block,
-                bucket_info.start,
-                bucket_info.size,
-                &mut self.coeff_state,
-                &mut self.bucket_state,
-                &mut self.ctx_start,
-                &mut self.ctx_bucket,
-                &mut self.ctx_root,
-                &mut self.ctx_mant,
-                &self.quant_lo,
-                &self.quant_hi,
-            )?;
+            self.encode_buckets(zp, bit, band, blockno, fbucket, nbucket)?;
         }
 
-        // Always advance to next band/bit-plane
-        let has_more = self.finish_code_slice()?;
-        
-        // Return true if we have more to process
-        Ok(has_more)
+        Ok(true)
     }
 
-    /// Check if the current slice is null (no significant coefficients)
-    /// According to DjVu spec: a coefficient becomes active when |coeff| >= step_size
-    /// The step size at bit-plane k is: step_size = initial_step_size >> k
-    fn is_null_slice(&mut self, bit: usize, band: usize) -> bool {
-        if self.cur_bit < 0 {
-            return true;
-        }
+    /// Prepares the state of coefficients and buckets for encoding.
+    /// Returns block-wide OR of {UNK,NEW,ACTIVE} bits ("bbstate").
+    pub fn encode_prepare(&mut self, band: i32, fbucket: usize, nbucket: usize, blockno: usize, bit: i32) -> u8 {
+        let th_hi = (self.quant_hi[band as usize] >> bit).max(1);
+        let coeff_base = blockno * 64 * 16;
+        let bucket_base = blockno * 64;
 
-        if band == 0 {
-            // For DC band, check all 16 subbands
-            for i in 0..16 {
-                // CORRECTED: Calculate step size for the current bit-plane
-                let step_size = (self.quant_lo[i] >> self.cur_bit).max(1);
-                self.coeff_state[i] = ZERO;
+        let mut bbstate = 0;
 
-                if step_size > 1 { // Corresponds to DjVu check (s > 0) after shifting
-                    // Check if any coefficient in this subband is significant
-                    for blockno in 0..self.map.num_blocks {
-                        if let Some(bucket) = self.map.blocks[blockno].get_bucket(i as u8) {
-                            for &coeff in bucket {
-                                if (coeff as i32).abs() >= step_size {
-                                    return false; // Found significant coefficient, slice is not null
-                                }
-                            }
-                        }
-                    }
+        for buck in 0..nbucket {
+            let bucket_idx = fbucket + buck;
+            let coeff_idx0 = coeff_base + bucket_idx * 16;
+            let src = self.map.blocks[blockno].get_bucket(bucket_idx as u8);
+            let mut bstate = 0;
+
+            if let Some(src16) = src {
+                let thres = if band == 0 {
+                    // each position has its own quantiser
+                    None
+                } else {
+                    Some(th_hi)
+                };
+
+                for i in 0..16 {
+                    let gidx = coeff_idx0 + i;
+                    let already = self.is_signif(gidx);
+                    // threshold depends on band 0 vs >0
+                    let step = thres.unwrap_or_else(|| {
+                        (self.quant_lo[i] >> bit).max(1)
+                    });
+
+                    let state = if already {
+                        ACTIVE
+                    } else if (src16[i] as i32).abs() >= (step + 1) / 2 {
+                        // Note: Multiplying by 2 makes the check more robust against
+                        // minor noise from the wavelet transform for near-zero coefficients.
+                        // This helps prevent encoding insignificant AC coefficients in solid color images.
+                        NEW | UNK
+                    } else {
+                        UNK
+                    };
+
+                    self.coeff_state[gidx] = state;
+                    bstate |= state;
+                }
+            } else {
+                // zero bucket, nothing significant yet
+                bstate = UNK;
+                for i in 0..16 {
+                    self.coeff_state[coeff_idx0 + i] = UNK;
                 }
             }
-        } else {
-            // For AC bands
-            // CORRECTED: Calculate step size for the current bit-plane
-            let step_size = (self.quant_hi[band] >> self.cur_bit).max(1);
 
-            if step_size > 1 {
-                let bucket_info = BAND_BUCKETS[band];
-                for blockno in 0..self.map.num_blocks {
-                    for bucket_idx in bucket_info.start..(bucket_info.start + bucket_info.size) {
-                        if let Some(bucket) = self.map.blocks[blockno].get_bucket(bucket_idx as u8) {
-                            for &coeff in bucket {
-                                if (coeff as i32).abs() >= step_size {
-                                    return false; // Found significant coefficient, slice is not null
-                                }
-                            }
-                        }
-                    }
-                }
+            self.bucket_state[bucket_base + bucket_idx] = bstate;
+            bbstate |= bstate;
+        }
+
+        bbstate
+    }
+
+    /// Encodes a sequence of buckets in a block using the ZEncoder.
+    fn encode_buckets<W: Write>(&mut self, zp: &mut ZEncoder<W>, bit: i32, band: i32, blockno: usize, fbucket: usize, nbucket: usize) -> Result<(), super::EncoderError> {
+        // Prepare the state for this block
+        let bbstate = self.encode_prepare(band, fbucket, nbucket, blockno, bit);
+
+        // If the block is completely empty for this slice (no new OR active coefficients),
+        // encode a single 'false' bit and finish with this block. This is the "root bit".
+        if (bbstate & (NEW | ACTIVE)) == 0 {
+            // Only encode the root bit if we have unknown coefficients.
+            // If the block is all zeros and will remain so, bbstate will be just UNK.
+            if (bbstate & UNK) != 0 {
+                zp.encode(false, &mut self.ctx_root).map_err(super::EncoderError::ZCodec)?;
             }
-        }
-
-        // If we looped through everything and found nothing, the slice is null.
-        true
-    }
-
-    /// Advance to the next band or bit-plane
-    fn finish_code_slice(&mut self) -> Result<bool> {
-        // CORRECTED: The quantization tables should hold the initial, constant values.
-        // The step sizes are calculated dynamically based on cur_bit.
-        // Removed the logic that halved step sizes.
-
-        self.cur_band += 1;
-        if self.cur_band >= BAND_BUCKETS.len() {
-            self.cur_band = 0;
-            self.cur_bit -= 1; // Decrement bit-plane after all bands
-        }
-        Ok(self.cur_bit >= 0)
-    }
-
-    /// Encode buckets for a block in the current slice
-    fn encode_buckets_static<W: Write>(
-        zp: &mut ZEncoder<W>,
-        bit: usize,
-        band: usize,
-        blk: &Block,
-        eblk: &mut Block,
-        fbucket: usize,
-        nbucket: usize,
-        coeff_state: &mut [u8; 256],
-        bucket_state: &mut [u8; 16],
-        ctx_start: &mut [u8; 32],
-        ctx_bucket: &mut [[u8; 8]; 10],
-        ctx_root: &mut u8,
-        ctx_mant: &mut u8,
-        quant_lo: &[i32; 16],
-        quant_hi: &[i32; 10],
-    ) -> Result<()> {
-        let bbstate = Self::encode_prepare_static(
-            band, fbucket, nbucket, blk, eblk, bit,
-            coeff_state, bucket_state, quant_lo, quant_hi
-        );
-        
-        if bbstate == 0 {
             return Ok(());
         }
 
-        // Encode bucket-level decisions
-        for buckno in 0..nbucket {
-            let bstate = bucket_state[buckno];
-            
-            // Encode whether this bucket is active
-            if (bstate & (NEW | ACTIVE)) != 0 {
-                let ctx_idx = if band == 0 {
-                    &mut ctx_start[buckno.min(31)]
-                } else {
-                    &mut ctx_bucket[(band - 1).min(9)][buckno.min(7)]
-                };
-                zp.encode(true, ctx_idx)?;
+        // --- THIS IS THE CORRECTED LOGIC ---
+        // We must encode the root bit if there's any uncertainty or activity.
+        // The bit's value is determined *only* by the presence of NEW coefficients.
+        zp.encode((bbstate & NEW) != 0, &mut self.ctx_root).map_err(super::EncoderError::ZCodec)?;
 
-                // Encode coefficient-level data for active buckets
-                // Pass relative bucket index to fix state indexing
-                Self::encode_bucket_coeffs_static(
-                    zp, bit, band, blk, eblk, fbucket + buckno, buckno,
-                    coeff_state, ctx_root, ctx_mant, quant_lo, quant_hi
-                )?;
-            } else {
-                // Bucket is inactive - encode "false" bit
-                let ctx_idx = if band == 0 {
-                    &mut ctx_start[buckno.min(31)]
-                } else {
-                    &mut ctx_bucket[(band - 1).min(9)][buckno.min(7)]
-                };
-                zp.encode(false, ctx_idx)?;
+        // Code bucket bits
+        if (bbstate & NEW) != 0 {
+            let bucket_offset = blockno * 64;
+            for buckno in 0..nbucket {
+                if (self.bucket_state[bucket_offset + fbucket + buckno] & UNK) != 0 {
+                    let mut ctx = 0;
+                    if band > 0 {
+                        let k = (fbucket + buckno) << 2;
+                        if let Some(b) = self.emap.blocks[blockno].get_bucket((k >> 4) as u8) {
+                            let k = k & 0xf;
+                            if b[k] != 0 { ctx += 1; }
+                            if b[k + 1] != 0 { ctx += 1; }
+                            if b[k + 2] != 0 { ctx += 1; }
+                            if ctx < 3 && b[k + 3] != 0 { ctx += 1; }
+                        }
+                    }
+                    if (bbstate & ACTIVE) != 0 {
+                        ctx |= 4;
+                    }
+                    zp.encode(
+                        (self.bucket_state[bucket_offset + fbucket + buckno] & NEW) != 0,
+                        &mut self.ctx_bucket[band as usize][ctx],
+                    ).map_err(|e| super::EncoderError::ZCodec(e))?;
+                }
             }
         }
 
+        // Code new active coefficients with their signs
+        if (bbstate & NEW) != 0 {
+            let thres = self.quant_hi[band as usize];
+            let coeff_offset = blockno * 64 * 16;
+            let bucket_offset = blockno * 64;
+            for buckno in 0..nbucket {
+                if (self.bucket_state[bucket_offset + fbucket + buckno] & NEW) != 0 {
+                    let pcoeff = self.map.blocks[blockno].get_bucket((fbucket + buckno) as u8).unwrap();
+                    let epcoeff = self.emap.blocks[blockno].get_bucket_mut((fbucket + buckno) as u8);
+                    let mut gotcha = 0;
+                    let maxgotcha = 7;
+                    let coeff_idx = coeff_offset + (fbucket + buckno) * 16;
+                    for i in 0..16 {
+                        if (self.coeff_state[coeff_idx + i] & UNK) != 0 {
+                            gotcha += 1;
+                        }
+                    }
+                    for i in 0..16 {
+                        if (self.coeff_state[coeff_idx + i] & UNK) != 0 {
+                            let ctx = if gotcha >= maxgotcha { maxgotcha } else { gotcha } |
+                                      if (self.bucket_state[bucket_offset + fbucket + buckno] & ACTIVE) != 0 { 8 } else { 0 };
+                            let is_new = (self.coeff_state[coeff_idx + i] & NEW) != 0;
+                            zp.encode(is_new, &mut self.ctx_start[ctx]).map_err(|e| super::EncoderError::ZCodec(e))?;
+                            if is_new {
+                                let sign = pcoeff[i] < 0;
+                                // Use IWencoder for sign bits (raw bits)
+                                zp.IWencoder(sign).map_err(|e| super::EncoderError::ZCodec(e))?;
+                                let thres_local = if band == 0 { self.quant_lo[i] } else { thres };
+                                // The threshold for the current bit-plane
+                                let plane_thres = thres_local >> bit;
+                                // Reconstruct coefficient value (matching C++ logic)
+                                let sign_bit = pcoeff[i] < 0;
+                                epcoeff[i] = if sign_bit {
+                                    (-((plane_thres * 3 + 2) >> 1)) as i16
+                                } else {
+                                    ((plane_thres * 3 + 2) >> 1) as i16
+                                };
+                                gotcha = 0;
+                            } else if gotcha > 0 {
+                                gotcha -= 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Code mantissa bits
+        if (bbstate & ACTIVE) != 0 {
+            let base_thres = self.quant_hi[band as usize];
+            let bucket_offset = blockno * 64;
+            for buckno in 0..nbucket {
+                if (self.bucket_state[bucket_offset + fbucket + buckno] & ACTIVE) != 0 {
+                    let pcoeff = self.map.blocks[blockno]
+                        .get_bucket((fbucket + buckno) as u8).unwrap();
+                    let epcoeff = self.emap.blocks[blockno]
+                        .get_bucket_mut((fbucket + buckno) as u8);
+                    for i in 0..16 {
+                        let gidx = (blockno * 64 * 16) + (fbucket + buckno) * 16 + i;
+                        if (self.coeff_state[gidx] & ACTIVE) != 0 {
+                            let coeff = pcoeff[i].abs() as i32;
+                            let ecoeff = epcoeff[i] as i32;
+                            // threshold per band or per position for band 0
+                            let thres_local = if band == 0 { self.quant_lo[i] } else { base_thres };
+                            // Get absolute values for comparison
+                            let abs_coeff = coeff.abs();
+                            let abs_ecoeff = ecoeff.abs();
+                            
+                            // Compute mantissa bit
+                            let pix = abs_coeff >= abs_ecoeff;
+                            
+                            // Choose encoder based on estimated coefficient magnitude
+                            if abs_ecoeff <= 3 * thres_local {
+                                // Low magnitude - use adaptive encoding
+                                zp.encode(pix, &mut self.ctx_mant).map_err(|e| super::EncoderError::ZCodec(e))?;
+                            } else {
+                                // High magnitude - use raw encoding
+                                zp.IWencoder(pix).map_err(|e| super::EncoderError::ZCodec(e))?;
+                            }
+                            
+                            // Adjust epcoeff (matching C++ logic exactly)
+                            // epcoeff[i] = ecoeff - (pix ? 0 : thres) + (thres >> 1);
+                            let adjustment = if pix { 0 } else { thres_local };
+                            epcoeff[i] = (ecoeff - adjustment + (thres_local >> 1)) as i16;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // --- NEW ➜ ACTIVE promotion (one pass, no branches in hot loop) ---
+        if (bbstate & NEW) != 0 {
+            let coeff_base = blockno * 64 * 16 + fbucket * 16;
+            let bucket_base = blockno * 64;
+            for buck in 0..nbucket {
+                if (self.bucket_state[bucket_base + fbucket + buck] & NEW) != 0 {
+                    for i in 0..16 {
+                        let gidx = coeff_base + buck * 16 + i;
+                        if (self.coeff_state[gidx] & NEW) != 0 {
+                            self.mark_signif(gidx);          // persist
+                            self.coeff_state[gidx] = ACTIVE;  // next slice → refinement only
+                        }
+                    }
+                }
+            }
+        }
+        
         Ok(())
     }
 
-    /// Encode individual coefficients within a bucket
-    fn encode_bucket_coeffs_static<W: Write>(
-        zp: &mut ZEncoder<W>,
-        bit: usize,
-        band: usize,
-        blk: &Block,
-        eblk: &mut Block,
-        bucket_idx: usize,
-        relative_bucket_idx: usize,  // Added: relative bucket index within band
-        coeff_state: &mut [u8; 256],
-        ctx_root: &mut u8,
-        ctx_mant: &mut u8,
-        quant_lo: &[i32; 16],
-        quant_hi: &[i32; 10],
-    ) -> Result<()> {
-        if let Some(coeffs) = blk.get_bucket(bucket_idx as u8) {
-            let mut ecoeffs = eblk.get_bucket(bucket_idx as u8)
-                .map(|prev| *prev)
-                .unwrap_or([0; 16]);
-            
-            for (i, &coeff) in coeffs.iter().enumerate() {
-                // Fixed: Use relative bucket index to prevent state collisions
-                let cstate_idx = relative_bucket_idx * 16 + i;
-                let cstate = if cstate_idx < coeff_state.len() {
-                    coeff_state[cstate_idx]
-                } else {
-                    UNK
-                };
 
-                if (cstate & NEW) != 0 {
-                    // New significant coefficient - encode activation decision
-                    // CORRECTED: Calculate step size for the current bit-plane
-                    let s_initial = if band == 0 { quant_lo[bucket_idx] } else { quant_hi[band] };
-                    let step_size = (s_initial >> bit).max(1);
-                    let threshold = step_size; // The threshold for significance is the current step size
 
-                    let scaled_coeff = (coeff as i32).abs();
-                    
-                    if threshold > 1 && scaled_coeff >= threshold {
-                        // Encode that coefficient becomes significant
-                        zp.encode(true, ctx_root)?;
-                        
-                        // Encode sign
-                        zp.encode(coeff < 0, ctx_root)?;
-                        
-                        // Set initial reconstructed value: step_size + (step_size >> 1)
-                        let sign = if coeff < 0 { -1 } else { 1 };
-                        let recon = step_size + (step_size >> 1);
-                        ecoeffs[i] = (sign * recon) as i16;
-                        
-                        // Update state: NEW -> ACTIVE for next bit-plane
-                        if cstate_idx < coeff_state.len() {
-                            coeff_state[cstate_idx] = ACTIVE;
+    /// Estimates the encoding error in decibels for quality control.
+    pub fn estimate_decibel(&self, frac: f32) -> f32 {
+        let mut xmse = vec![0.0; self.map.num_blocks];
+        let norm_lo = &IW_NORM[0..16];
+        let norm_hi = &[0.0, IW_NORM[3], IW_NORM[6], IW_NORM[9], IW_NORM[10], IW_NORM[11], IW_NORM[12], IW_NORM[13], IW_NORM[14], IW_NORM[15]];
+
+        for blockno in 0..self.map.num_blocks {
+            let mut mse = 0.0;
+            for bandno in 0..10 {
+                let fbucket = BAND_BUCKETS[bandno].start;
+                let nbucket = BAND_BUCKETS[bandno].size;
+                let norm = norm_hi[bandno];
+                for buckno in 0..nbucket {
+                    if let (Some(pcoeff), Some(epcoeff)) = (
+                        self.map.blocks[blockno].get_bucket((fbucket + buckno) as u8),
+                        self.emap.blocks[blockno].get_bucket((fbucket + buckno) as u8),
+                    ) {
+                        for i in 0..16 {
+                            let norm_coeff = if bandno == 0 { norm_lo[i] } else { norm };
+                            let delta = (pcoeff[i] as f32 - epcoeff[i] as f32).abs();
+                            mse += norm_coeff * delta * delta;
                         }
-                    } else {
-                        // Coefficient not significant at this bit-plane
-                        zp.encode(false, ctx_root)?;
-                        // Keep as NEW for lower bit-planes
+                    } else if let Some(pcoeff) = self.map.blocks[blockno].get_bucket((fbucket + buckno) as u8) {
+                        for i in 0..16 {
+                            let norm_coeff = if bandno == 0 { norm_lo[i] } else { norm };
+                            let delta = pcoeff[i] as f32;
+                            mse += norm_coeff * delta * delta;
+                        }
                     }
-                } else if (cstate & ACTIVE) != 0 {
-                    // Refinement of already significant coefficient
-                    // CORRECTED: Calculate step size for the current bit-plane
-                    let s_initial = if band == 0 { quant_lo[bucket_idx] } else { quant_hi[band] };
-                    let step_size = (s_initial >> bit).max(1);
-                    
-                    let orig_coeff = coeff as i32;
-                    let prev_val = ecoeffs[i] as i32;
-                    let coeff_abs = orig_coeff.abs();
-                    
-                    // Compute mantissa bit: pix = (coeff >= ecoeff) ? 1 : 0
-                    let pix = if coeff_abs >= prev_val.abs() { 1 } else { 0 };
-                    
-                    // Encode mantissa bit
-                    zp.encode(pix != 0, ctx_mant)?;
-                    
-                    // Adjust coefficient: epcoeff[i] = ecoeff - (pix ? 0 : step_size) + (step_size >> 1);
-                    let sign = if prev_val < 0 { -1 } else { 1 };
-                    let abs_ecoeff = prev_val.abs();
-                    let adjustment = if pix != 0 { 0 } else { step_size };
-                    let new_abs = abs_ecoeff - adjustment + (step_size >> 1);
-                    ecoeffs[i] = (sign * new_abs) as i16;
                 }
-                // Note: ZERO coefficients are not encoded
             }
-            
-            eblk.set_bucket(bucket_idx as u8, ecoeffs);
+            xmse[blockno] = mse / 1024.0;
         }
 
-        Ok(())
-    }
-
-    /// Prepare states for encoding buckets
-    fn encode_prepare_static(
-        band: usize,
-        fbucket: usize,
-        nbucket: usize,
-        blk: &Block,
-        eblk: &Block,
-        cur_bit: usize,
-        coeff_state: &mut [u8; 256],
-        bucket_state: &mut [u8; 16],
-        quant_lo: &[i32; 16],
-        quant_hi: &[i32; 10],
-    ) -> u8 {
-        let mut bbstate = 0;
-        
-        for buckno in 0..nbucket {
-            let pcoeff = blk.get_bucket((fbucket + buckno) as u8);
-            let epcoeff = eblk.get_bucket((fbucket + buckno) as u8);
-            let mut bstatetmp = 0;
-            
-            // CORRECTED: Calculate step size for the current bit-plane
-            let absolute_bucket_idx = fbucket + buckno;
-            let initial_s = if band == 0 {
-                if absolute_bucket_idx < 16 { quant_lo[absolute_bucket_idx] } else { 0 }
-            } else {
-                quant_hi[band]
-            };
-            let threshold = (initial_s >> cur_bit).max(1);
-
-            match (pcoeff, epcoeff) {
-                (Some(pc), Some(epc)) => {
-                    for i in 0..16 {
-                        let cstate_idx = buckno * 16 + i;
-                        if cstate_idx < coeff_state.len() {
-                            let mut cstatetmp = ZERO;
-                            
-                            if epc[i] != 0 {
-                                // Already active from previous bit-plane
-                                cstatetmp = ACTIVE;
-                            } else if threshold > 1 && (pc[i] as i32).abs() >= threshold {
-                                // Could become significant at this bit-plane
-                                cstatetmp = NEW | UNK;
-                            } else if threshold > 1 {
-                                // Not significant yet, but could be at lower bit-planes
-                                cstatetmp = UNK;
-                            }
-                            
-                            coeff_state[cstate_idx] = cstatetmp;
-                            bstatetmp |= cstatetmp;
-                        }
-                    }
-                }
-                (Some(pc), None) => {
-                    for i in 0..16 {
-                        let cstate_idx = buckno * 16 + i;
-                        if cstate_idx < coeff_state.len() {
-                            let mut cstatetmp = ZERO;
-                            
-                            if threshold > 1 && (pc[i] as i32).abs() >= threshold {
-                                // Could become significant at this bit-plane
-                                cstatetmp = NEW | UNK;
-                            } else if threshold > 1 {
-                                // Not significant yet, but could be at lower bit-planes
-                                cstatetmp = UNK;
-                            }
-                            
-                            coeff_state[cstate_idx] = cstatetmp;
-                            bstatetmp |= cstatetmp;
-                        }
-                    }
-                }
-                _ => bstatetmp = 0,
-            }
-            
-            bucket_state[buckno] = bstatetmp;
-            bbstate |= bstatetmp;
-        }
-        
-        bbstate
+        let p = (self.map.num_blocks as f32 * (1.0 - frac)).floor() as usize;
+        let mut xmse_sorted = xmse.clone();
+        xmse_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mse_avg = xmse_sorted[p..].iter().sum::<f32>() / (self.map.num_blocks - p) as f32;
+        let factor = 255.0 * (1 << super::constants::IW_SHIFT) as f32;
+        10.0 * (factor * factor / mse_avg).log10()
     }
 }

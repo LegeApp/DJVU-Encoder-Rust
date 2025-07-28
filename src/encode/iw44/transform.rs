@@ -1,7 +1,5 @@
 use std::simd::{LaneCount, SupportedLaneCount};
 
-
-
 /// Saturating conversion from i32 to i16 to prevent overflow
 #[inline]
 fn _sat16(x: i32) -> i16 {
@@ -26,24 +24,22 @@ impl Encode {
                 } else {
                     0
                 };
-                // Center and scale for fixed-point IW44: (0..255 -> -128..127) << IW_SHIFT
                 data32[y * w + x] = ((px as i32) - 128) << crate::encode::iw44::constants::IW_SHIFT;
             }
         }
     }
 
-    /// Fill data32 from a GrayImage (u8), centering values as needed for IW44.
-    /// 
-    /// # Arguments
-    /// * `img` - Input grayscale image
-    /// * `data32` - Output buffer (must be at least stride * h in size)
-    /// * `w` - Image width (actual, not padded)
-    /// * `h` - Image height (actual, not padded) 
-    /// * `stride` - Row stride in the output buffer (typically padded width)
-    pub fn from_u8_image_with_stride(img: &::image::GrayImage, data32: &mut [i32], w: usize, h: usize, stride: usize) {
-        // Clear the buffer first to ensure padding is zero
+    /// Fill data32 from a GrayImage (u8) with stride, using border extension.
+    pub fn from_u8_image_with_stride(
+        img: &::image::GrayImage,
+        data32: &mut [i32],
+        w: usize,
+        h: usize,
+        stride: usize,
+    ) {
         data32.fill(0);
         
+        // First, populate the actual image data
         for y in 0..h {
             for x in 0..w {
                 let px = if x < img.width() as usize && y < img.height() as usize {
@@ -51,204 +47,271 @@ impl Encode {
                 } else {
                     0
                 };
-                // Center and scale for fixed-point IW44: (0..255 -> -128..127) << IW_SHIFT
                 data32[y * stride + x] = ((px as i32) - 128) << crate::encode::iw44::constants::IW_SHIFT;
+            }
+        }
+        
+        // Extend borders to fill padding area (mirror/replicate edge pixels)
+        let buffer_h = data32.len() / stride;
+        
+        // Extend right border (replicate rightmost column)
+        for y in 0..h {
+            let edge_val = data32[y * stride + (w - 1)];
+            for x in w..stride {
+                data32[y * stride + x] = edge_val;
+            }
+        }
+        
+        // Extend bottom border (replicate bottom row)
+        for y in h..buffer_h {
+            for x in 0..stride {
+                data32[y * stride + x] = data32[(h - 1) * stride + x];
             }
         }
     }
 
-    /// Fill data32 from a signed i8 buffer, casting to i32.
-    /// 
-    /// # Arguments
-    /// * `channel_buf` - Input buffer (must be at least w * h in size)
-    /// * `data32` - Output buffer (must be at least stride * h in size)
-    /// * `w` - Image width (actual, not padded)
-    /// * `h` - Image height (actual, not padded)
-    /// * `stride` - Row stride in the output buffer (typically padded width)
-    pub fn from_i8_channel_with_stride(channel_buf: &[i8], data32: &mut [i32], w: usize, h: usize, stride: usize) {
-        // Clear the buffer first to ensure padding is zero
+    /// Fill data32 from a signed i8 buffer with stride, using border extension.
+    pub fn from_i8_channel_with_stride(
+        channel_buf: &[i8],
+        data32: &mut [i32],
+        w: usize,
+        h: usize,
+        stride: usize,
+    ) {
         data32.fill(0);
         
+        // First, populate the actual image data
         for y in 0..h {
             for x in 0..w {
-                let idx = y * w + x;  // Index in input buffer (packed)
-                let out_idx = y * stride + x;  // Index in output buffer (strided)
-                let val = if idx < channel_buf.len() {
-                    channel_buf[idx] as i32
-                } else {
-                    0
-                };
-                // Scale signed i8 values for fixed-point arithmetic
-                data32[out_idx] = (val as i32) << crate::encode::iw44::constants::IW_SHIFT;
+                let idx = y * w + x;
+                let val = if idx < channel_buf.len() { channel_buf[idx] as i32 } else { 0 };
+                data32[y * stride + x] = val << crate::encode::iw44::constants::IW_SHIFT;
+            }
+        }
+        
+        // Extend borders to fill padding area (mirror/replicate edge pixels)
+        let buffer_h = data32.len() / stride;
+        
+        // Extend right border (replicate rightmost column)
+        for y in 0..h {
+            let edge_val = data32[y * stride + (w - 1)];
+            for x in w..stride {
+                data32[y * stride + x] = edge_val;
+            }
+        }
+        
+        // Extend bottom border (replicate bottom row)
+        for y in h..buffer_h {
+            for x in 0..stride {
+                data32[y * stride + x] = data32[(h - 1) * stride + x];
             }
         }
     }
-    /// Forward wavelet transform using the lifting scheme.
-    /// Port of `IW44Image::Transform::Encode::forward` from DjVuLibre.
-    /// DjVu's IW44 performs the horizontal filter first, then the
-    /// vertical filter for each decomposition level.
-    ///
-    /// # Arguments
-    /// * `buf` - Coefficient data to transform (modified in-place)
-    /// * `w` - Image width
-    /// * `h` - Image height
-    /// * `levels` - Number of decomposition levels
+
+    /// Forward wavelet transform using the streaming algorithm from DjVuLibre.
     pub fn forward<const LANES: usize>(
         buf: &mut [i32],
         w: usize,
         h: usize,
+        rowsize: usize,
         levels: usize,
     ) where
         LaneCount<LANES>: SupportedLaneCount,
     {
-        // Work on progressively smaller low-pass rectangles
-        let mut cur_w = w;
-        let mut cur_h = h;
+        let mut scale = 1;
+        for _ in 0..levels {
+            // 1. horizontal pass stays 32-bit
+            filter_fh(buf, w, h, rowsize, scale);
 
-        for level in 0..levels {
-            let _scale = 1 << level; // not used with packed implementation
+            // 2. vertical pass expects 16-bit ─ cast, run, cast back
+            let mut tmp: Vec<i16> = buf.iter().map(|&v| _sat16(v)).collect();
+            filter_fv(&mut tmp, w, h, rowsize, scale);
+            for (d, &v) in buf.iter_mut().zip(tmp.iter()) {
+                *d = v as i32;
+            }
 
-            // DjVu's IW44 performs the horizontal filter first, then the
-            // vertical filter for each decomposition level.
-            fwt_horizontal_inplace_single_level::<LANES>(buf, w, cur_w, cur_h);
-            fwt_vertical_inplace_single_level::<LANES>(buf, w, cur_w, cur_h);
-
-            // Next level operates on the even samples only
-            cur_w = (cur_w + 1) / 2;
-            cur_h = (cur_h + 1) / 2;
+            scale <<= 1;
         }
     }
-    
-    /// Prepare image data for wavelet transform with proper pixel shifting and centering.
-    /// This handles the conversion from various input formats to the i32 buffer format expected by the transform.
-    pub fn prepare_and_transform<F>(
-        data32: &mut [i32], 
-        w: usize, 
-        h: usize, 
-        pixel_fn: F
-    ) where F: Fn(usize, usize) -> i32 
+
+    /// Prepare image data and perform the wavelet transform.
+    pub fn prepare_and_transform<F>(data32: &mut [i32], w: usize, h: usize, pixel_fn: F)
+    where
+        F: Fn(usize, usize) -> i32,
     {
-        // Copy pixels with proper shifting
         for y in 0..h {
             for x in 0..w {
                 data32[y * w + x] = pixel_fn(x, y);
             }
         }
-        
-        // Debug: Check input data before transform
-        let sample_indices = [0, w/4, w/2, 3*w/4, w-1];
-        let mut input_samples = Vec::new();
-        let mut min_val = i32::MAX;
-        let mut max_val = i32::MIN;
-        sample_indices.iter().for_each(|&x| {
-            sample_indices.iter().for_each(|&y| {
-                if x < w && y < h {
-                    let val = data32[y * w + x];
-                    input_samples.push(((x, y), val));
-                    min_val = min_val.min(val);
-                    max_val = max_val.max(val);
-                }
-            });
-        });
+        Self::forward::<4>(data32, w, h, w, 5); // Default levels=5 as per DjVu spec
     }
 }
 
-/// Mirror index for boundaries: even symmetry around 0 and around size-1
-/// Ported from DjVuLibre.
+/// Streaming horizontal filter (port of filter_fh from IW44EncodeCodec.cpp:514)
+fn filter_fh(buf: &mut [i32], w: usize, h: usize, mut rowsize: usize, scale: usize) {
+    let s = scale;
+    let s3 = s + s + s;
+    rowsize *= scale;
+
+    let mut y = 0usize;
+    let mut p = 0usize;
+
+    while y < h {
+        let mut q = p + s;
+        let e = p + w;
+
+        let mut a1 = 0i32;
+        let mut a2 = 0i32;
+        let mut a3 = 0i32;
+        let mut b1 = 0i32;
+        let mut b2 = 0i32;
+        let mut b3 = 0i32;
+
+        if q < e {
+            a1 = buf[q - s];
+            a2 = a1;
+            a3 = a1;
+            if q + s < e { a2 = buf[q + s]; }
+            if q + s3 < e { a3 = buf[q + s3]; }
+            b3 = buf[q] - ((a1 + a2 + 1) >> 1);
+            buf[q] = b3;
+            q += s + s;
+        }
+
+        while q + s3 < e {
+            let a0 = a1; a1 = a2; a2 = a3; a3 = buf[q + s3];
+            let b0 = b1; b1 = b2; b2 = b3;
+            b3 = buf[q] - ((((a1 + a2) << 3) + (a1 + a2) - a0 - a3 + 8) >> 4);
+            buf[q] = b3;
+            let idx_i = q as isize - s3 as isize;
+            if idx_i >= 0 {
+                let idx = idx_i as usize;
+                buf[idx] = buf[idx] + ((((b1 + b2) << 3) + (b1 + b2) - b0 - b3 + 16) >> 5);
+            }
+            q += s + s;
+        }
+
+        while q < e {
+            a1 = a2; a2 = a3;
+            let b0 = b1; b1 = b2; b2 = b3;
+            b3 = buf[q] - ((a1 + a2 + 1) >> 1);
+            buf[q] = b3;
+            let idx_i = q as isize - s3 as isize;
+            if idx_i >= 0 {
+                let idx = idx_i as usize;
+                buf[idx] = buf[idx] + ((((b1 + b2) << 3) + (b1 + b2) - b0 - b3 + 16) >> 5);
+            }
+            q += s + s;
+        }
+
+        while (q as isize) - (s3 as isize) < e as isize {
+            let b0 = b1; b1 = b2; b2 = b3; b3 = 0;
+            let idx_i = q as isize - s3 as isize;
+            if idx_i >= 0 {
+                let idx = idx_i as usize;
+                buf[idx] = buf[idx] + ((((b1 + b2) << 3) + (b1 + b2) - b0 - b3 + 16) >> 5);
+            }
+            q += s + s;
+        }
+
+        y += scale;
+        p += rowsize;
+    }
+}
+
+
+/// Streaming vertical filter (port of filter_fv from IW44EncodeCodec.cpp:404)
+fn filter_fv(buf: &mut [i16], w: usize, h: usize, rowsize: usize, scale: usize) {
+    let s = scale * rowsize;
+    let s3 = s + s + s;
+    let mut y = 1usize;
+    let mut p = s;
+    let hlimit = ((h - 1) / scale) + 1;
+
+    while y as isize - 3 < hlimit as isize {
+        // 1-Delta
+        {
+            let mut q = p;
+            let e = q + w;
+            if y >= 3 && y + 3 < hlimit {
+                while q < e {
+                    let a = buf[q - s] as i32 + buf[q + s] as i32;
+                    let b = buf[q - s3] as i32 + buf[q + s3] as i32;
+                    buf[q] = (buf[q] as i32 - (((a << 3) + a - b + 8) >> 4)) as i16;
+                    q += scale;
+                }
+            } else if y < hlimit {
+                let mut q1 = if y + 1 < hlimit { q + s } else { q - s };
+                while q < e {
+                    let a = buf[q - s] as i32 + buf[q1] as i32;
+                    buf[q] = (buf[q] as i32 - ((a + 1) >> 1)) as i16;
+                    q += scale;
+                    q1 += scale;
+                }
+            }
+        }
+
+        // 2-Update
+        {
+            let q_i = p as isize - s3 as isize;
+            if q_i >= 0 {
+                let mut q = q_i as usize;
+                let e = q + w;
+                if y >= 6 && y < hlimit {
+                    while q < e {
+                        let a = buf[q - s] as i32 + buf[q + s] as i32;
+                        let b = buf[q - s3] as i32 + buf[q + s3] as i32;
+                        buf[q] = (buf[q] as i32 + (((a << 3) + a - b + 16) >> 5)) as i16;
+                        q += scale;
+                    }
+                } else if y >= 3 {
+                    let mut q1 = if y - 2 < hlimit { Some(q + s) } else { None };
+                    let mut q3 = if y < hlimit { Some(q + s3) } else { None };
+                    if y >= 6 {
+                        while q < e {
+                            let a = buf[q - s] as i32 + q1.map_or(0, |idx| buf[idx] as i32);
+                            let b = buf[q - s3] as i32 + q3.map_or(0, |idx| buf[idx] as i32);
+                            buf[q] = (buf[q] as i32 + (((a << 3) + a - b + 16) >> 5)) as i16;
+                            q += scale;
+                            if let Some(ref mut idx) = q1 { *idx += scale; }
+                            if let Some(ref mut idx) = q3 { *idx += scale; }
+                        }
+                    } else if y >= 4 {
+                        while q < e {
+                            let a = buf[q - s] as i32 + q1.map_or(0, |idx| buf[idx] as i32);
+                            let b = q3.map_or(0, |idx| buf[idx] as i32);
+                            buf[q] = (buf[q] as i32 + (((a << 3) + a - b + 16) >> 5)) as i16;
+                            q += scale;
+                            if let Some(ref mut idx) = q1 { *idx += scale; }
+                            if let Some(ref mut idx) = q3 { *idx += scale; }
+                        }
+                    } else {
+                        while q < e {
+                            let a = q1.map_or(0, |idx| buf[idx] as i32);
+                            let b = q3.map_or(0, |idx| buf[idx] as i32);
+                            buf[q] = (buf[q] as i32 + (((a << 3) + a - b + 16) >> 5)) as i16;
+                            q += scale;
+                            if let Some(ref mut idx) = q1 { *idx += scale; }
+                            if let Some(ref mut idx) = q3 { *idx += scale; }
+                        }
+                    }
+                }
+            }
+        }
+
+        y += 2;
+        p += s + s;
+    }
+}
+/// Mirror index with even symmetry (DjVu style).
 #[inline]
 fn mirror(mut k: isize, size: usize) -> usize {
-    if size == 0 {
-        return 0;
-    }
-    let size = size as isize;
     if k < 0 {
         k = -k;
     }
-    let period = (size - 1) * 2;
-    k %= period;
-    if k >= size {
-        k = period - k;
+    if k >= size as isize {
+        k = (size as isize - 2) - (k - size as isize);
     }
     k as usize
-}
-
-/// Forward Deslauriers-Dubuc (4,4) lifting on a single 1-D line.
-fn forward_lift_line(line: &mut [i32]) {
-    let n = line.len();
-    if n < 2 { return; }
-
-    let mut tmp = vec![0i32; n];
-
-    // Predict step on odd indices
-    for i in (1..n).step_by(2) {
-        let xm1 = line[mirror(i as isize - 1, n)];
-        let xp1 = line[mirror(i as isize + 1, n)];
-        let xm3 = line[mirror(i as isize - 3, n)];
-        let xp3 = line[mirror(i as isize + 3, n)];
-        let pred = (-xm3 + 9 * xm1 + 9 * xp1 - xp3 + 8) >> 4;
-        tmp[i] = line[i] - pred;
-    }
-
-    // Update step on even indices
-    for i in (0..n).step_by(2) {
-        let dm1 = tmp[mirror(i as isize - 1, n)];
-        let dp1 = tmp[mirror(i as isize + 1, n)];
-        let dm3 = tmp[mirror(i as isize - 3, n)];
-        let dp3 = tmp[mirror(i as isize + 3, n)];
-        let upd = (-dm3 + 9 * dm1 + 9 * dp1 - dp3 + 16) >> 5;
-        tmp[i] = line[i] + upd;
-    }
-
-    // Pack: low-pass (even) then high-pass (odd)
-    let mut j = 0;
-    for i in (0..n).step_by(2) { line[j] = tmp[i]; j += 1; }
-    for i in (1..n).step_by(2) { line[j] = tmp[i]; j += 1; }
-}
-
-/// In-place *vertical* pass for **one** decomposition level.
-///
-/// * `buf`  – pixel buffer (row-major).
-/// * `full_w` – full image width (for row addressing).
-/// * `work_w/work_h` – working rectangle dimensions to process.
-/// Processes only the current level within the given rectangle.
-pub fn fwt_vertical_inplace_single_level<const LANES: usize>(
-    buf: &mut [i32],
-    full_w: usize,
-    work_w: usize,
-    work_h: usize,
-) where
-    LaneCount<LANES>: SupportedLaneCount,
-{
-    if work_h < 2 { return; }
-
-    // Process each column separately using a temporary buffer
-    for x in 0..work_w {
-        let mut column: Vec<i32> = (0..work_h).map(|y| buf[y * full_w + x]).collect();
-        forward_lift_line(&mut column);
-        for y in 0..work_h {
-            buf[y * full_w + x] = column[y];
-        }
-    }
-}
-
-/// In-place *horizontal* pass for **one** decomposition level.
-///
-/// * `buf`   – image plane, row-major, mutable so we can overwrite in place.
-/// * `full_w` – full image width (for row addressing).
-/// * `work_w/work_h` – working rectangle dimensions to process.
-/// Processes only the current level within the given rectangle.
-pub fn fwt_horizontal_inplace_single_level<const LANES: usize>(
-    buf: &mut [i32],
-    full_w: usize,
-    work_w: usize,
-    work_h: usize,
-) where
-    LaneCount<LANES>: SupportedLaneCount,
-{
-    if work_w < 2 { return; }
-
-    for row in 0..work_h {
-        let start = row * full_w;
-        forward_lift_line(&mut buf[start..start + work_w]);
-    }
 }

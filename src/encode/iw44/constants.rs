@@ -12,6 +12,7 @@ pub const IW_QUANT: [i32; 16] = [
 ];
 
 pub const IW_SHIFT: i32 = 6;
+pub const IW_ROUND: i32 = 1 << (IW_SHIFT - 1); // = 32
 
 // From IW44EncodeCodec.cpp - DECIBEL_PRUNE constant
 pub const DECIBEL_PRUNE: f32 = 5.0;
@@ -33,12 +34,12 @@ pub struct BandBucketInfo {
 }
 
 pub const BAND_BUCKETS: [BandBucketInfo; 10] = [
-    BandBucketInfo { start: 0, size: 16 },  // Band 0: buckets 0-15  (coeffs 0-255)
-    BandBucketInfo { start: 1, size: 1 },   // Band 1: bucket 1     (coeffs 16-31)
-    BandBucketInfo { start: 2, size: 1 },   // Band 2: bucket 2     (coeffs 32-47)
-    BandBucketInfo { start: 3, size: 1 },   // Band 3: bucket 3     (coeffs 48-63)
-    BandBucketInfo { start: 4, size: 4 },   // Band 4: buckets 4-7  (coeffs 64-127)
-    BandBucketInfo { start: 8, size: 4 },   // Band 5: buckets 8-11 (coeffs 128-191)
+    BandBucketInfo { start: 0, size: 1 },   // Band 0: bucket 0      (coeffs 0-15, DC band)
+    BandBucketInfo { start: 1, size: 1 },   // Band 1: bucket 1      (coeffs 16-31)
+    BandBucketInfo { start: 2, size: 1 },   // Band 2: bucket 2      (coeffs 32-47)
+    BandBucketInfo { start: 3, size: 1 },   // Band 3: bucket 3      (coeffs 48-63)
+    BandBucketInfo { start: 4, size: 4 },   // Band 4: buckets 4-7   (coeffs 64-127)
+    BandBucketInfo { start: 8, size: 4 },   // Band 5: buckets 8-11  (coeffs 128-191)
     BandBucketInfo { start: 12, size: 4 },  // Band 6: buckets 12-15 (coeffs 192-255)
     BandBucketInfo { start: 16, size: 16 }, // Band 7: buckets 16-31 (coeffs 256-511)
     BandBucketInfo { start: 32, size: 16 }, // Band 8: buckets 32-47 (coeffs 512-767)

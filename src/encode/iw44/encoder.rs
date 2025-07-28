@@ -8,7 +8,7 @@ use bytemuck;
 use std::io::Cursor;
 use std::sync::OnceLock;
 use thiserror::Error;
-use log::{debug, info, warn, error};
+use log::{debug, info};
 
 #[derive(Error, Debug)]
 pub enum EncoderError {
@@ -41,26 +41,24 @@ pub struct EncoderParams {
 impl Default for EncoderParams {
     fn default() -> Self {
         Self {
-            decibels: Some(90.0), // Default to good quality instead of None
+            decibels: Some(90.0),
             crcb_mode: CrcbMode::Full,
             db_frac: 0.35,
         }
     }
 }
-// (1) helper to go from signed i8 → unbiased u8
-#[inline]
-fn _signed_to_unsigned_u8(v: i8) -> u8 { (v as i16 + 128) as u8 }
 
-fn _convert_signed_buffer_to_grayscale(buf: &[i8], w: u32, h: u32) -> GrayImage {
-    let bytes: Vec<u8> = buf.iter().map(|&v| _signed_to_unsigned_u8(v)).collect();
+#[inline]
+fn signed_to_unsigned_u8(v: i8) -> u8 { (v as i16 + 128) as u8 }
+
+fn convert_signed_buffer_to_grayscale(buf: &[i8], w: u32, h: u32) -> GrayImage {
+    let bytes: Vec<u8> = buf.iter().map(|&v| signed_to_unsigned_u8(v)).collect();
     GrayImage::from_raw(w, h, bytes).expect("Invalid buffer dimensions")
 }
 
-// fixed-point constants, same as before
-const _SCALE: i32 = 1 << 16;
+const SCALE: i32 = 1 << 16;
 const ROUND: i32 = 1 << 15;
 
-// precompute only once
 static YCC_TABLES: OnceLock<([[i32; 256]; 3], [[i32; 256]; 3], [[i32; 256]; 3])> = OnceLock::new();
 
 fn get_ycc_tables() -> &'static ([[i32; 256]; 3], [[i32; 256]; 3], [[i32; 256]; 3]) {
@@ -69,16 +67,13 @@ fn get_ycc_tables() -> &'static ([[i32; 256]; 3], [[i32; 256]; 3], [[i32; 256]; 
         let mut cb = [[0;256]; 3];
         let mut cr = [[0;256]; 3];
         
-        // Use EXACT coefficients from original DjVu C++ encoder
-        // From IW44EncodeCodec.cpp rgb_to_ycc[3][3] matrix:
         const RGB_TO_YCC: [[f32; 3]; 3] = [
-            [ 0.304348,  0.608696,  0.086956],  // Y coefficients
-            [ 0.463768, -0.405797, -0.057971],  // Cr coefficients
-            [-0.173913, -0.347826,  0.521739],  // Cb coefficients
+            [ 0.304348,  0.608696,  0.086956],
+            [ 0.463768, -0.405797, -0.057971],
+            [-0.173913, -0.347826,  0.521739],
         ];
         
         for k in 0..256 {
-            // Exactly match C++ code: rmul[k] = (int)(k * 0x10000 * rgb_to_ycc[0][0]);
             y[0][k] = (k as f32 * 65536.0 * RGB_TO_YCC[0][0]) as i32;
             y[1][k] = (k as f32 * 65536.0 * RGB_TO_YCC[0][1]) as i32;
             y[2][k] = (k as f32 * 65536.0 * RGB_TO_YCC[0][2]) as i32;
@@ -95,8 +90,6 @@ fn get_ycc_tables() -> &'static ([[i32; 256]; 3], [[i32; 256]; 3], [[i32; 256]; 
     })
 }
 
-/// Convert an RGB-buffer (`img_raw`, length must be divisible by 3)
-/// into three signed i8 planes (`out_y`, `out_cb`, `out_cr`).
 pub fn rgb_to_ycbcr_planes(
     img_raw: &[u8],
     out_y:   &mut [i8],
@@ -116,10 +109,6 @@ pub fn rgb_to_ycbcr_planes(
         let g = chunk[1] as usize;
         let b = chunk[2] as usize;
 
-        // Exactly match C++ code calculation:
-        // int y = rmul[p2->r] + gmul[p2->g] + bmul[p2->b] + 32768;
-        // *out2 = (y >> 16) - 128;
-        
         let y = y_tbl[0][r] + y_tbl[1][g] + y_tbl[2][b] + 32768;
         out_y[i] = ((y >> 16) - 128) as i8;
 
@@ -131,7 +120,6 @@ pub fn rgb_to_ycbcr_planes(
     }
 }
 
-/// Convert RgbImage to YCbCr buffers (wrapper for rgb_to_ycbcr_planes)
 pub fn rgb_to_ycbcr_buffers(
     img: &RgbImage,
     out_y: &mut [i8],
@@ -143,10 +131,9 @@ pub fn rgb_to_ycbcr_buffers(
     assert_eq!(out_cb.len(), pixels.len());
     assert_eq!(out_cr.len(), pixels.len());
 
-    // Call the main conversion function
     rgb_to_ycbcr_planes(img.as_raw(), out_y, out_cb, out_cr);
 }
-/// Convert an `RgbImage` into three signed‐i8 planes (Y, Cb, Cr).
+
 pub fn ycbcr_from_rgb(img: &RgbImage) -> (Vec<i8>, Vec<i8>, Vec<i8>) {
     let (w, h) = img.dimensions();
     let npix = (w * h) as usize;
@@ -155,19 +142,13 @@ pub fn ycbcr_from_rgb(img: &RgbImage) -> (Vec<i8>, Vec<i8>, Vec<i8>) {
     let mut cb_buf = vec![0i8; npix];
     let mut cr_buf = vec![0i8; npix];
 
-    // Re-use your core converter
     rgb_to_ycbcr_planes(img.as_raw(), &mut y_buf, &mut cb_buf, &mut cr_buf);
     
-    // DEBUG PRINT 1: After RGB to YCbCr Conversion
-    println!("DEBUG: YCbCr for {}x{} image (first 3 pixels):", w, h);
-    println!("  Y: {:?}", &y_buf[0..3.min(npix)]);
-    println!("  Cb: {:?}", &cb_buf[0..3.min(npix)]);
-    println!("  Cr: {:?}", &cr_buf[0..3.min(npix)]);
+    debug!("YCbCr conversion completed for {}x{} image", w, h);
     
     (y_buf, cb_buf, cr_buf)
 }
 
-/// Build Y/Cb/Cr `Codec`s (or None for chroma) from signed‐i8 planes.
 pub fn make_ycbcr_codecs(
     y_buf: &[i8],
     cb_buf: &[i8],
@@ -177,19 +158,15 @@ pub fn make_ycbcr_codecs(
     mask: Option<&GrayImage>,
     params: &EncoderParams,
 ) -> (Codec, Option<Codec>, Option<Codec>) {
-    // Y is always present
     let ymap     = CoeffMap::create_from_signed_channel(y_buf, width, height, mask, "Y");
     let y_codec  = Codec::new(ymap, params);
 
-    // Decide whether to build Cb/Cr
     let (cb_codec, cr_codec) = match params.crcb_mode {
         CrcbMode::None => (None, None),
         CrcbMode::Half => {
-            // CORRECTED: For half mode, subsample the chroma buffers BEFORE creating coefficient maps
             let (half_width, half_height) = ((width + 1) / 2, (height + 1) / 2);
             let half_size = (half_width * half_height) as usize;
             
-            // Create subsampled buffers by averaging 2x2 blocks
             let mut cb_half = vec![0i8; half_size];
             let mut cr_half = vec![0i8; half_size];
             
@@ -197,7 +174,6 @@ pub fn make_ycbcr_codecs(
                 for x in 0..half_width {
                     let dst_idx = (y * half_width + x) as usize;
                     
-                    // Average up to 4 source pixels (2x2 block)
                     let mut cb_sum = 0i32;
                     let mut cr_sum = 0i32;
                     let mut count = 0;
@@ -234,7 +210,6 @@ pub fn make_ycbcr_codecs(
     (y_codec, cb_codec, cr_codec)
 }
 
-/// High-level: build an `IWEncoder` straight from RGB.
 pub fn encoder_from_rgb_with_helpers(
     img: &RgbImage,
     mask: Option<&GrayImage>,
@@ -253,10 +228,17 @@ pub fn encoder_from_rgb_with_helpers(
         total_slices: 0,
         total_bytes: 0,
         serial: 0,
+        crcb_delay: match params.crcb_mode {
+            CrcbMode::None => -1,
+            CrcbMode::Half => 10,
+            CrcbMode::Normal => 10,
+            CrcbMode::Full => 0,
+        },
+        cur_bit: 9,  // Start at highest bitplane
+        cur_band: 0, // Start at band 0
     })
 }
 
-/// And a symmetric one for gray:
 pub fn encoder_from_gray_with_helpers(
     img: &GrayImage,
     mask: Option<&GrayImage>,
@@ -273,8 +255,12 @@ pub fn encoder_from_gray_with_helpers(
         total_slices: 0,
         total_bytes: 0,
         serial: 0,
+        crcb_delay: -1,
+        cur_bit: 9,  // Start at highest bitplane
+        cur_band: 0, // Start at band 0
     })
 }
+
 pub struct IWEncoder {
     y_codec: Codec,
     cb_codec: Option<Codec>,
@@ -283,6 +269,10 @@ pub struct IWEncoder {
     total_slices: usize,
     total_bytes: usize,
     serial: u8,
+    crcb_delay: i32,
+    // Centralized state management
+    cur_bit: i32,    // Current bitplane (starts at 9, decrements to -1)
+    cur_band: i32,   // Current band (0-9)
 }
 
 impl IWEncoder {
@@ -303,16 +293,11 @@ impl IWEncoder {
         encoder_from_rgb_with_helpers(img, mask, params)
     }
 
-
     pub fn encode_chunk(&mut self, max_slices: usize) -> Result<(Vec<u8>, bool), EncoderError> {
         info!("encode_chunk called with max_slices={}", max_slices);
-        info!("Y codec cur_bit={}, CB codec cur_bit={:?}, CR codec cur_bit={:?}", 
-                 self.y_codec.cur_bit,
-                 self.cb_codec.as_ref().map(|c| c.cur_bit),
-                 self.cr_codec.as_ref().map(|c| c.cur_bit));
         
         let (w, h) = {
-            let map = &self.y_codec.map;
+            let map = self.y_codec.map();
             let w = map.width();
             let h = map.height();
             if w == 0 || h == 0 {
@@ -321,149 +306,136 @@ impl IWEncoder {
             (w, h)
         };
 
-        // Check if all codecs are finished
-        let all_finished = self.y_codec.cur_bit < 0 && 
-                          self.cb_codec.as_ref().map_or(true, |c| c.cur_bit < 0) &&
-                          self.cr_codec.as_ref().map_or(true, |c| c.cur_bit < 0);
-        
-        if all_finished {
+        if self.params.decibels.is_none() && max_slices == 0 {
+            return Err(EncoderError::NeedStopCondition);
+        }
+
+        // Check if encoding is finished (centralized state)
+        if self.cur_bit < 0 {
             return Ok((Vec::new(), false));
         }
 
         let mut chunk_data = Vec::new();
         let mut zp = ZEncoder::new(Cursor::new(Vec::new()), true)?;
-
         let mut slices_encoded = 0;
-        let _initial_bytes = self.total_bytes;
-        
-        // Track if any component contributed data to this chunk
-        let mut chunk_y_has_data = false;
-        let mut chunk_cb_has_data = false;
-        let mut chunk_cr_has_data = false;
-        
-        // Encode slices according to DjVu spec: multiple slices per chunk
-        // Each "slice" is one logical unit containing color bands for active components
-        // Each codec maintains its own cur_bit and progresses independently
-        while slices_encoded < max_slices {
-            // Check if any codec still has data to encode
-            let any_active = self.y_codec.cur_bit >= 0 || 
-                           self.cb_codec.as_ref().map_or(false, |c| c.cur_bit >= 0) ||
-                           self.cr_codec.as_ref().map_or(false, |c| c.cur_bit >= 0);
+        let mut estdb = -1.0;
+
+        let _more = self.cur_bit >= 0;
+        while slices_encoded < max_slices && self.cur_bit >= 0 {
+            // Debug logging to track slice progression and crcb_delay
+            debug!("slice {}  bit={} band={}  (delay={})", 
+                   self.total_slices, self.cur_bit, self.cur_band, self.crcb_delay);
             
-            debug!("Loop iteration, any_active={}, Y cur_bit={}, slices_encoded={}", 
-                     any_active, self.y_codec.cur_bit, slices_encoded);
-            
-            if !any_active {
-                debug!("No codecs active, breaking loop");
-                break;
-            }
-            
-            // A DjVu "slice" contains one color band for each active component
-            // Encode Y component if it still has data
-            let y_has_data = if self.y_codec.cur_bit >= 0 {
-                debug!("Calling Y codec encode_slice, cur_bit={}", self.y_codec.cur_bit);
-                self.y_codec.encode_slice(&mut zp)?
-            } else {
-                debug!("Y codec finished (cur_bit < 0)");
-                false
-            };
-            if y_has_data { chunk_y_has_data = true; }
-            
-            // CORRECTED: Unconditionally encode Cb and Cr if the codecs exist and are active.
-            // The faulty delay logic has been removed.
-            let mut cb_has_data = false;
-            if let Some(ref mut cb) = &mut self.cb_codec {
-                if cb.cur_bit >= 0 {
-                    cb_has_data = cb.encode_slice(&mut zp)?;
+            // The new `encode_slice` handles empty slices internally by writing a single 'false' bit.
+            // We no longer need to check for activity here.
+            self.y_codec.encode_slice(&mut zp, self.cur_bit, self.cur_band)?;
+
+            // Cb and Cr codecs encode if they exist and delay conditions are met
+            if let Some(ref mut cb) = self.cb_codec {
+                if self.total_slices as i32 >= self.crcb_delay {
+                    debug!("Encoding Cb slice {}", self.total_slices);
+                    cb.encode_slice(&mut zp, self.cur_bit, self.cur_band)?;
                 }
             }
-            if cb_has_data { chunk_cb_has_data = true; }
-            
-            let mut cr_has_data = false;
-            if let Some(ref mut cr) = &mut self.cr_codec {
-                if cr.cur_bit >= 0 {
-                    cr_has_data = cr.encode_slice(&mut zp)?;
+            if let Some(ref mut cr) = self.cr_codec {
+                if self.total_slices as i32 >= self.crcb_delay {
+                    debug!("Encoding Cr slice {}", self.total_slices);
+                    cr.encode_slice(&mut zp, self.cur_bit, self.cur_band)?;
                 }
             }
-            if cr_has_data { chunk_cr_has_data = true; }
-            
-            // Each loop iteration corresponds to one logical slice even if it
-            // produced no output bytes.  The DjVu specification progresses the
-            // band/bit-plane state for every slice, regardless of whether any
-            // coefficients were actually encoded.  Breaking early when a slice
-            // contains no data prevents later bit-planes from ever being
-            // encoded, which caused missing chroma information.  Therefore we
-            // always advance the slice counters.
+
+            // A slice is always processed, so we always increment and advance.
             slices_encoded += 1;
             self.total_slices += 1;
 
-            // If none of the components produced data we simply continue to
-            // the next slice.  The codec state was already advanced inside each
-            // `encode_slice` call.
-            if !y_has_data && !cb_has_data && !cr_has_data {
-                continue;
+            // Advance to the next bit/band combination BEFORE checking quality
+            // This ensures we don't get stuck repeating the same slice
+            self.advance_slice();
+
+            // Quality control - estimate decibels
+            if let Some(db_target) = self.params.decibels {
+                if self.cur_band == 0 || estdb >= db_target - super::constants::DECIBEL_PRUNE {
+                    estdb = self.y_codec.estimate_decibel(self.params.db_frac);
+                    if estdb >= db_target {
+                        info!("encode_chunk: Reached target decibels {:.2}, stopping", db_target);
+                        // Set cur_bit to -1 to signal completion and break the loop.
+                        self.cur_bit = -1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let zp_data = zp.finish()?.into_inner();
+        
+        // Debug: Check for suspicious repeating patterns in ZP data
+        if zp_data.len() > 100 {
+            let mut repeating_detected = false;
+            for window_size in 2..=10 {
+                if zp_data.len() >= window_size * 3 {
+                    let pattern = &zp_data[0..window_size];
+                    let mut matches = 0;
+                    for chunk in zp_data.chunks_exact(window_size) {
+                        if chunk == pattern {
+                            matches += 1;
+                        }
+                    }
+                    if matches > zp_data.len() / window_size / 2 {
+                        info!("WARNING: Detected repeating pattern of size {} in ZP data ({}% of file)", 
+                              window_size, (matches * 100) / (zp_data.len() / window_size));
+                        repeating_detected = true;
+                        break;
+                    }
+                }
+            }
+            if !repeating_detected {
+                info!("ZP data looks normal (no major repeating patterns detected)");
             }
         }
         
-        // Finish ZP encoding
-        let zp_data = zp.finish()?.into_inner();
-        
-        // Only create a chunk if we encoded some slices
         if slices_encoded == 0 || zp_data.is_empty() {
+            info!("encode_chunk: No new data encoded (slices_encoded={}, zp_data_len={}). Returning empty chunk.", slices_encoded, zp_data.len());
             return Ok((Vec::new(), false));
         }
 
-        // Write IW44 chunk header according to DjVu spec
-        
-        // Serial number (1 byte)
+        info!("encode_chunk: Finished encoding {} slices. ZEncoder produced {} bytes.", slices_encoded, zp_data.len());
+
+        // Write IW44 chunk header
         chunk_data.push(self.serial);
-        
-        // Number of slices in this chunk (1 byte)
         chunk_data.push(slices_encoded as u8);
 
-        // Additional headers only for first chunk (serial 0)
         if self.serial == 0 {
-            // Major version and color type (1 byte)
-            let is_color = self.cb_codec.is_some();
-            let color_bit = if is_color { 1 } else { 0 }; // 1 = color, 0 = grayscale
-            let major = (color_bit << 7) | 1; // Version 1
+            let is_color = self.cb_codec.is_some() && self.cr_codec.is_some();
+            let major = if is_color { 1 } else { 0x81 }; // Version 1, 0x80 for grayscale
             chunk_data.push(major);
-            
-            // Minor version (1 byte)
-            chunk_data.push(2);
-            
-            // Image width (2 bytes, big endian)
+            chunk_data.push(2); // Minor version 2 per C++
             chunk_data.extend_from_slice(&(w as u16).to_be_bytes());
-            
-            // Image height (2 bytes, big endian)
             chunk_data.extend_from_slice(&(h as u16).to_be_bytes());
-            
-            // Chrominance delay counter (1 byte) - set to 0 since we encode all components immediately
-            chunk_data.push(0x80); // MSB set to 1 as per spec, delay = 0
+            let crcb_delay_byte = if self.crcb_delay >= 0 { self.crcb_delay as u8 } else { 0x80 };
+            chunk_data.push(crcb_delay_byte);
         }
 
-        // Append the ZP-encoded slice data
         chunk_data.extend_from_slice(&zp_data);
 
-        // DEBUG PRINT 5: After Chunk Encoding  
-        println!("DEBUG: Chunk {}: {} slices, {} bytes (Y_data={}, Cb_data={}, Cr_data={})", 
-                 self.serial, slices_encoded, chunk_data.len(), 
-                 chunk_y_has_data, chunk_cb_has_data, chunk_cr_has_data);
+        info!("encode_chunk: Created chunk with serial {}. Total chunk size: {} bytes.", self.serial, chunk_data.len());
 
-        // Update state
         self.serial = self.serial.wrapping_add(1);
         self.total_bytes += chunk_data.len();
 
-        #[cfg(debug_assertions)]
-        debug!("Writing IW44 chunk {}, {} slices, {} bytes", 
-                 self.serial - 1, slices_encoded, chunk_data.len());
-        
-        // Determine if there are more slices to emit
-        // 'more' is true if we hit the max_slices for this chunk AND any codec still has data to process
-        let any_codec_active = self.y_codec.cur_bit >= 0 || 
-                              self.cb_codec.as_ref().map_or(false, |c| c.cur_bit >= 0) ||
-                              self.cr_codec.as_ref().map_or(false, |c| c.cur_bit >= 0);
-        let more = any_codec_active && slices_encoded == max_slices;
+        // More data remains if we haven't exhausted all bitplanes.
+        // The encoder terminates when cur_bit < 0 (all bitplanes done) OR when quality target is reached
+        let more = self.cur_bit >= 0;
         Ok((chunk_data, more))
+    }
+
+    /// Advances the slice state (bit, band) in a synchronized manner
+    fn advance_slice(&mut self) {
+        debug!("advance_slice: BEFORE: bit={}, band={}", self.cur_bit, self.cur_band);
+        self.cur_band += 1;
+        if self.cur_band >= 10 {
+            self.cur_band = 0;
+            self.cur_bit -= 1;
+        }
+        debug!("advance_slice: AFTER: bit={}, band={}", self.cur_bit, self.cur_band);
     }
 }

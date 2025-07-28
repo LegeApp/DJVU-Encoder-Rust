@@ -37,6 +37,24 @@ impl Block {
         }
     }
 
+    /// Write coefficients from buckets back to a liftblock in zigzag order
+    /// This is the inverse of read_liftblock and is needed for proper spatial reconstruction
+    pub fn write_liftblock(&self, liftblock: &mut [i16; 1024]) {
+        // Clear the output buffer
+        liftblock.fill(0);
+        
+        // Reconstruct coefficients in zigzag order
+        for (i, &loc) in ZIGZAG_LOC.iter().enumerate() {
+            let bucket_idx = (i / 16) as u8;
+            let coeff_idx_in_bucket = i % 16;
+            
+            if let Some(bucket) = self.buckets[bucket_idx as usize].as_ref() {
+                liftblock[loc] = bucket[coeff_idx_in_bucket];
+            }
+            // If bucket is None, coefficient remains 0 (already set by fill)
+        }
+    }
+
     #[inline]
     pub fn get_bucket(&self, bucket_idx: u8) -> Option<&[i16; 16]> {
         self.buckets[bucket_idx as usize].as_ref()
@@ -58,6 +76,41 @@ impl Block {
     #[inline]
     pub fn set_bucket(&mut self, bucket_idx: u8, val: [i16; 16]) {
         self.buckets[bucket_idx as usize] = Some(val);
+    }
+
+    /// Get a coefficient at a specific zigzag index
+    pub fn get_coeff_at_zigzag_index(&self, zigzag_idx: usize) -> i16 {
+        let bucket_idx = (zigzag_idx / 16) as u8;
+        let coeff_idx_in_bucket = zigzag_idx % 16;
+        
+        if let Some(bucket) = self.buckets[bucket_idx as usize].as_ref() {
+            bucket[coeff_idx_in_bucket]
+        } else {
+            0
+        }
+    }
+
+    /// Set a coefficient at a specific zigzag index
+    pub fn set_coeff_at_zigzag_index(&mut self, zigzag_idx: usize, value: i16) {
+        let bucket_idx = (zigzag_idx / 16) as u8;
+        let coeff_idx_in_bucket = zigzag_idx % 16;
+        
+        if value == 0 {
+            // If setting to zero, we might be able to clear the bucket
+            if let Some(bucket) = self.buckets[bucket_idx as usize].as_mut() {
+                bucket[coeff_idx_in_bucket] = 0;
+                // Check if entire bucket is now zero
+                if bucket.iter().all(|&x| x == 0) {
+                    self.buckets[bucket_idx as usize] = None;
+                }
+            }
+        } else {
+            // Ensure bucket exists
+            if self.buckets[bucket_idx as usize].is_none() {
+                self.buckets[bucket_idx as usize] = Some([0; 16]);
+            }
+            self.buckets[bucket_idx as usize].as_mut().unwrap()[coeff_idx_in_bucket] = value;
+        }
     }
 }
 
@@ -138,7 +191,7 @@ impl CoeffMap {
 
         // Apply the actual wavelet transform to convert pixels to coefficients
         let levels = ((map.bw.min(map.bh) as f32).log2() as usize).min(5);
-        Encode::forward::<4>(&mut data32, map.bw, map.bh, levels);
+        Encode::forward::<4>(&mut data32, map.bw, map.bh, map.bw, levels);
         
         // DEBUG PRINT 2: After Wavelet Transform
         println!("DEBUG: After wavelet transform for channel ({}x{}):", width, height);
@@ -230,4 +283,9 @@ impl CoeffMap {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod zigzag_tests {
+    include!("zigzag_test.rs");
 }

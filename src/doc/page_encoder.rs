@@ -8,6 +8,7 @@ use crate::encode::{
 use crate::iff::{iff::IffWriter, bs_byte_stream::bzz_compress};
 use crate::{DjvuError, Result};
 use byteorder::{BigEndian, WriteBytesExt};
+use log::debug;
 use image::RgbImage;
 use lutz::Image;
 use std::io::{self, Write};
@@ -133,8 +134,8 @@ impl PageComponents {
             // Write AT&T magic bytes first
             writer.write_magic_bytes()?;
 
-            // Manually write the FORM:DJVU header to get its size position.
-            let form_size_pos = writer.write_chunk_header("FORM:DJVU")?;
+            // Start the FORM:DJVU chunk
+            writer.put_chunk("FORM:DJVU")?;
 
             // Write INFO chunk (required for all pages)
             self.write_info_chunk(
@@ -218,8 +219,8 @@ impl PageComponents {
                 self.write_text_chunk(text, &mut writer)?;
             }
 
-            // Now that all content is written, patch the FORM chunk's size.
-            writer.patch_chunk_size(form_size_pos)?;
+            // Close the FORM:DJVU chunk
+            writer.close_chunk()?;
         }
         Ok(output)
     }
@@ -280,22 +281,14 @@ impl PageComponents {
         // Debug: Check input image properties
         let (w, h) = img.dimensions();
         let raw_data = img.as_raw();
-        println!("DEBUG: Input image {}x{}, {} bytes", w, h, raw_data.len());
+        debug!("Input image {}x{}, {} bytes", w, h, raw_data.len());
 
         // Check some sample pixels
         if raw_data.len() >= 9 {
-            println!(
-                "DEBUG: First 3 pixels: RGB({},{},{}) RGB({},{},{}) RGB({},{},{})",
-                raw_data[0],
-                raw_data[1],
-                raw_data[2],
-                raw_data[3],
-                raw_data[4],
-                raw_data[5],
-                raw_data[6],
-                raw_data[7],
-                raw_data[8]
-            );
+            debug!("First 3 pixels: RGB({},{},{}) RGB({},{},{}) RGB({},{},{})",
+                   raw_data[0], raw_data[1], raw_data[2],
+                   raw_data[3], raw_data[4], raw_data[5], 
+                   raw_data[6], raw_data[7], raw_data[8]);
         }
 
         // Configure IW44 encoder with proper quality-based parameters
@@ -306,10 +299,8 @@ impl PageComponents {
             30.0 + quality_ratio * 70.0 // 30-100 dB range
         });
         
-        println!(
-            "DEBUG: Configuring IW44 encoder with quality {} -> {:.1} dB",
-            params.bg_quality, target_decibels
-        );
+        debug!("Configuring IW44 encoder with quality {} -> {:.1} dB",
+               params.bg_quality, target_decibels);
 
         let iw44_params = IW44EncoderParams {
             decibels: Some(target_decibels),
@@ -333,7 +324,7 @@ impl PageComponents {
         };
 
         if mask_gray.is_some() {
-            println!("DEBUG: Using mask-aware IW44 encoding for background");
+            debug!("Using mask-aware IW44 encoding for background");
         }
 
         let mut encoder = IWEncoder::from_rgb(img, mask_gray.as_ref(), iw44_params)
@@ -350,33 +341,25 @@ impl PageComponents {
         };
 
         // Encode and write IW44 data in proper chunks according to DjVu spec
-        // According to the DjVu spec example, chunks should contain multiple slices:
-        // BG44 [935] IW4 data #1, 74 slices
-        // BG44 [1672] IW4 data #2, 10 slices  
-        // BG44 [815] IW4 data #3, 4 slices
-        // BG44 [9976] IW4 data #4, 9 slices
+        // Loop until encoder says it's done, like c44.exe does
         
         let mut chunk_count = 0;
-
-        // Per the DjVu spec, we repeatedly call the encoder to get data chunks until it's done.
-        // The encoder signals completion by returning an empty vector.
-        // We will ask for a reasonable number of slices per chunk.
-        const SLICES_PER_CHUNK: usize = 20;
-
-        loop {
-            let (iw44_stream, _more) = encoder
-                .encode_chunk(SLICES_PER_CHUNK) // We ignore the 'more' flag as it's unreliable
+        let mut more = true;
+        
+        while more {
+            let (iw44_stream, encoder_more) = encoder
+                .encode_chunk(74) // Use 74 slices per chunk like c44.exe
                 .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
 
             // An empty stream from the encoder signifies the end of data.
             if iw44_stream.is_empty() {
-                println!("DEBUG: Encoder returned empty chunk, signaling completion.");
+                debug!("Encoder returned empty chunk, stopping.");
                 break;
             }
 
             chunk_count += 1;
             println!(
-                "DEBUG: Writing IW44 chunk {}, {} bytes",
+                "DEBUG: Writing BG44 chunk {}, 74 slices, {} bytes",
                 chunk_count,
                 iw44_stream.len()
             );
@@ -384,7 +367,11 @@ impl PageComponents {
             writer.put_chunk(iw_chunk_id)?;
             writer.write_all(&iw44_stream)?;
             writer.close_chunk()?;
+            
+            more = encoder_more;
         }
+
+        debug!("Completed IW44 encoding with {} chunks", chunk_count);
 
         Ok(())
     }

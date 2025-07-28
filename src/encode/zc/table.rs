@@ -1,1555 +1,271 @@
-// src/zp_codec/table.rs
-
-/// Represents one entry in the ZP-Coder's static probability model table.
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
+/// Z-Coder probability table entry
+#[derive(Debug, Copy, Clone)]
 pub struct ZpTableEntry {
-    pub p: u16,
-    pub m: u16,
-    pub up: u8,
-    pub dn: u8,
+    pub p: u16,   // Probability value (16-bit)
+    pub m: u16,   // Threshold for MPS adaptation
+    pub up: u8,   // Next state when adapting up (MPS)
+    pub dn: u8,   // Next state when adapting down (LPS)
 }
 
-// Instructions for the user:
-// Copy the contents of the `default_ztable` array from ZPCodec.cpp
-// into the const array below. Replace the C-style `{...}` syntax
-// with Rust's `ZpTableEntry { ... }` syntax.
+macro_rules! zp {
+    ($p:expr, $m:expr, $up:expr, $dn:expr $(,)?) => {
+        ZpTableEntry { p: $p, m: $m, up: $up, dn: $dn }
+    };
+}
 
-pub const DEFAULT_ZP_TABLE: [ZpTableEntry; 256] = [
-    ZpTableEntry {
-        p: 0x8000,
-        m: 0x0000,
-        up: 84,
-        dn: 145,
-    }, // 000
-    ZpTableEntry {
-        p: 0x8000,
-        m: 0x0000,
-        up: 3,
-        dn: 4,
-    }, // 001
-    ZpTableEntry {
-        p: 0x8000,
-        m: 0x0000,
-        up: 4,
-        dn: 3,
-    }, // 002
-    ZpTableEntry {
-        p: 0x6bbd,
-        m: 0x10a5,
-        up: 5,
-        dn: 1,
-    }, // 003
-    ZpTableEntry {
-        p: 0x6bbd,
-        m: 0x10a5,
-        up: 6,
-        dn: 2,
-    }, // 004
-    ZpTableEntry {
-        p: 0x5d45,
-        m: 0x1f28,
-        up: 7,
-        dn: 3,
-    }, // 005
-    ZpTableEntry {
-        p: 0x5d45,
-        m: 0x1f28,
-        up: 8,
-        dn: 4,
-    }, // 006
-    ZpTableEntry {
-        p: 0x51b9,
-        m: 0x2bd3,
-        up: 9,
-        dn: 5,
-    }, // 007
-    ZpTableEntry {
-        p: 0x51b9,
-        m: 0x2bd3,
-        up: 10,
-        dn: 6,
-    }, // 008
-    ZpTableEntry {
-        p: 0x4813,
-        m: 0x36e3,
-        up: 11,
-        dn: 7,
-    }, // 009
-    ZpTableEntry {
-        p: 0x4813,
-        m: 0x36e3,
-        up: 12,
-        dn: 8,
-    }, // 010
-    ZpTableEntry {
-        p: 0x3fd5,
-        m: 0x408c,
-        up: 13,
-        dn: 9,
-    }, // 011
-    ZpTableEntry {
-        p: 0x3fd5,
-        m: 0x408c,
-        up: 14,
-        dn: 10,
-    }, // 012
-    ZpTableEntry {
-        p: 0x38b1,
-        m: 0x48fd,
-        up: 15,
-        dn: 11,
-    }, // 013
-    ZpTableEntry {
-        p: 0x38b1,
-        m: 0x48fd,
-        up: 16,
-        dn: 12,
-    }, // 014
-    ZpTableEntry {
-        p: 0x3275,
-        m: 0x505d,
-        up: 17,
-        dn: 13,
-    }, // 015
-    ZpTableEntry {
-        p: 0x3275,
-        m: 0x505d,
-        up: 18,
-        dn: 14,
-    }, // 016
-    ZpTableEntry {
-        p: 0x2cfd,
-        m: 0x56d0,
-        up: 19,
-        dn: 15,
-    }, // 017
-    ZpTableEntry {
-        p: 0x2cfd,
-        m: 0x56d0,
-        up: 20,
-        dn: 16,
-    }, // 018
-    ZpTableEntry {
-        p: 0x2825,
-        m: 0x5c71,
-        up: 21,
-        dn: 17,
-    }, // 019
-    ZpTableEntry {
-        p: 0x2825,
-        m: 0x5c71,
-        up: 22,
-        dn: 18,
-    }, // 020
-    ZpTableEntry {
-        p: 0x23ab,
-        m: 0x615b,
-        up: 23,
-        dn: 19,
-    }, // 021
-    ZpTableEntry {
-        p: 0x23ab,
-        m: 0x615b,
-        up: 24,
-        dn: 20,
-    }, // 022
-    ZpTableEntry {
-        p: 0x1f87,
-        m: 0x65a5,
-        up: 25,
-        dn: 21,
-    }, // 023
-    ZpTableEntry {
-        p: 0x1f87,
-        m: 0x65a5,
-        up: 26,
-        dn: 22,
-    }, // 024
-    ZpTableEntry {
-        p: 0x1bbb,
-        m: 0x6962,
-        up: 27,
-        dn: 23,
-    }, // 025
-    ZpTableEntry {
-        p: 0x1bbb,
-        m: 0x6962,
-        up: 28,
-        dn: 24,
-    }, // 026
-    ZpTableEntry {
-        p: 0x1845,
-        m: 0x6ca2,
-        up: 29,
-        dn: 25,
-    }, // 027
-    ZpTableEntry {
-        p: 0x1845,
-        m: 0x6ca2,
-        up: 30,
-        dn: 26,
-    }, // 028
-    ZpTableEntry {
-        p: 0x1523,
-        m: 0x6f74,
-        up: 31,
-        dn: 27,
-    }, // 029
-    ZpTableEntry {
-        p: 0x1523,
-        m: 0x6f74,
-        up: 32,
-        dn: 28,
-    }, // 030
-    ZpTableEntry {
-        p: 0x1253,
-        m: 0x71e6,
-        up: 33,
-        dn: 29,
-    }, // 031
-    ZpTableEntry {
-        p: 0x1253,
-        m: 0x71e6,
-        up: 34,
-        dn: 30,
-    }, // 032
-    ZpTableEntry {
-        p: 0x0fcf,
-        m: 0x7404,
-        up: 35,
-        dn: 31,
-    }, // 033
-    ZpTableEntry {
-        p: 0x0fcf,
-        m: 0x7404,
-        up: 36,
-        dn: 32,
-    }, // 034
-    ZpTableEntry {
-        p: 0x0d95,
-        m: 0x75d6,
-        up: 37,
-        dn: 33,
-    }, // 035
-    ZpTableEntry {
-        p: 0x0d95,
-        m: 0x75d6,
-        up: 38,
-        dn: 34,
-    }, // 036
-    ZpTableEntry {
-        p: 0x0b9d,
-        m: 0x7768,
-        up: 39,
-        dn: 35,
-    }, // 037
-    ZpTableEntry {
-        p: 0x0b9d,
-        m: 0x7768,
-        up: 40,
-        dn: 36,
-    }, // 038
-    ZpTableEntry {
-        p: 0x09e3,
-        m: 0x78c2,
-        up: 41,
-        dn: 37,
-    }, // 039
-    ZpTableEntry {
-        p: 0x09e3,
-        m: 0x78c2,
-        up: 42,
-        dn: 38,
-    }, // 040
-    ZpTableEntry {
-        p: 0x0861,
-        m: 0x79ea,
-        up: 43,
-        dn: 39,
-    }, // 041
-    ZpTableEntry {
-        p: 0x0861,
-        m: 0x79ea,
-        up: 44,
-        dn: 40,
-    }, // 042
-    ZpTableEntry {
-        p: 0x0711,
-        m: 0x7ae7,
-        up: 45,
-        dn: 41,
-    }, // 043
-    ZpTableEntry {
-        p: 0x0711,
-        m: 0x7ae7,
-        up: 46,
-        dn: 42,
-    }, // 044
-    ZpTableEntry {
-        p: 0x05f1,
-        m: 0x7bbe,
-        up: 47,
-        dn: 43,
-    }, // 045
-    ZpTableEntry {
-        p: 0x05f1,
-        m: 0x7bbe,
-        up: 48,
-        dn: 44,
-    }, // 046
-    ZpTableEntry {
-        p: 0x04f9,
-        m: 0x7c75,
-        up: 49,
-        dn: 45,
-    }, // 047
-    ZpTableEntry {
-        p: 0x04f9,
-        m: 0x7c75,
-        up: 50,
-        dn: 46,
-    }, // 048
-    ZpTableEntry {
-        p: 0x0425,
-        m: 0x7d0f,
-        up: 51,
-        dn: 47,
-    }, // 049
-    ZpTableEntry {
-        p: 0x0425,
-        m: 0x7d0f,
-        up: 52,
-        dn: 48,
-    }, // 050
-    ZpTableEntry {
-        p: 0x0371,
-        m: 0x7d91,
-        up: 53,
-        dn: 49,
-    }, // 051
-    ZpTableEntry {
-        p: 0x0371,
-        m: 0x7d91,
-        up: 54,
-        dn: 50,
-    }, // 052
-    ZpTableEntry {
-        p: 0x02d9,
-        m: 0x7dfe,
-        up: 55,
-        dn: 51,
-    }, // 053
-    ZpTableEntry {
-        p: 0x02d9,
-        m: 0x7dfe,
-        up: 56,
-        dn: 52,
-    }, // 054
-    ZpTableEntry {
-        p: 0x0259,
-        m: 0x7e5a,
-        up: 57,
-        dn: 53,
-    }, // 055
-    ZpTableEntry {
-        p: 0x0259,
-        m: 0x7e5a,
-        up: 58,
-        dn: 54,
-    }, // 056
-    ZpTableEntry {
-        p: 0x01ed,
-        m: 0x7ea6,
-        up: 59,
-        dn: 55,
-    }, // 057
-    ZpTableEntry {
-        p: 0x01ed,
-        m: 0x7ea6,
-        up: 60,
-        dn: 56,
-    }, // 058
-    ZpTableEntry {
-        p: 0x0193,
-        m: 0x7ee6,
-        up: 61,
-        dn: 57,
-    }, // 059
-    ZpTableEntry {
-        p: 0x0193,
-        m: 0x7ee6,
-        up: 62,
-        dn: 58,
-    }, // 060
-    ZpTableEntry {
-        p: 0x0149,
-        m: 0x7f1a,
-        up: 63,
-        dn: 59,
-    }, // 061
-    ZpTableEntry {
-        p: 0x0149,
-        m: 0x7f1a,
-        up: 64,
-        dn: 60,
-    }, // 062
-    ZpTableEntry {
-        p: 0x010b,
-        m: 0x7f45,
-        up: 65,
-        dn: 61,
-    }, // 063
-    ZpTableEntry {
-        p: 0x010b,
-        m: 0x7f45,
-        up: 66,
-        dn: 62,
-    }, // 064
-    ZpTableEntry {
-        p: 0x00d5,
-        m: 0x7f6b,
-        up: 67,
-        dn: 63,
-    }, // 065
-    ZpTableEntry {
-        p: 0x00d5,
-        m: 0x7f6b,
-        up: 68,
-        dn: 64,
-    }, // 066
-    ZpTableEntry {
-        p: 0x00a5,
-        m: 0x7f8d,
-        up: 69,
-        dn: 65,
-    }, // 067
-    ZpTableEntry {
-        p: 0x00a5,
-        m: 0x7f8d,
-        up: 70,
-        dn: 66,
-    }, // 068
-    ZpTableEntry {
-        p: 0x007b,
-        m: 0x7faa,
-        up: 71,
-        dn: 67,
-    }, // 069
-    ZpTableEntry {
-        p: 0x007b,
-        m: 0x7faa,
-        up: 72,
-        dn: 68,
-    }, // 070
-    ZpTableEntry {
-        p: 0x0057,
-        m: 0x7fc3,
-        up: 73,
-        dn: 69,
-    }, // 071
-    ZpTableEntry {
-        p: 0x0057,
-        m: 0x7fc3,
-        up: 74,
-        dn: 70,
-    }, // 072
-    ZpTableEntry {
-        p: 0x003b,
-        m: 0x7fd7,
-        up: 75,
-        dn: 71,
-    }, // 073
-    ZpTableEntry {
-        p: 0x003b,
-        m: 0x7fd7,
-        up: 76,
-        dn: 72,
-    }, // 074
-    ZpTableEntry {
-        p: 0x0023,
-        m: 0x7fe7,
-        up: 77,
-        dn: 73,
-    }, // 075
-    ZpTableEntry {
-        p: 0x0023,
-        m: 0x7fe7,
-        up: 78,
-        dn: 74,
-    }, // 076
-    ZpTableEntry {
-        p: 0x0013,
-        m: 0x7ff2,
-        up: 79,
-        dn: 75,
-    }, // 077
-    ZpTableEntry {
-        p: 0x0013,
-        m: 0x7ff2,
-        up: 80,
-        dn: 76,
-    }, // 078
-    ZpTableEntry {
-        p: 0x0007,
-        m: 0x7ffa,
-        up: 81,
-        dn: 77,
-    }, // 079
-    ZpTableEntry {
-        p: 0x0007,
-        m: 0x7ffa,
-        up: 82,
-        dn: 78,
-    }, // 080
-    ZpTableEntry {
-        p: 0x0001,
-        m: 0x7fff,
-        up: 81,
-        dn: 79,
-    }, // 081
-    ZpTableEntry {
-        p: 0x0001,
-        m: 0x7fff,
-        up: 82,
-        dn: 80,
-    }, // 082
-    ZpTableEntry {
-        p: 0x5695,
-        m: 0x0000,
-        up: 9,
-        dn: 85,
-    }, // 083
-    ZpTableEntry {
-        p: 0x24ee,
-        m: 0x0000,
-        up: 86,
-        dn: 226,
-    }, // 084
-    ZpTableEntry {
-        p: 0x8000,
-        m: 0x0000,
-        up: 5,
-        dn: 6,
-    }, // 085
-    ZpTableEntry {
-        p: 0x0d30,
-        m: 0x0000,
-        up: 88,
-        dn: 176,
-    }, // 086
-    ZpTableEntry {
-        p: 0x481a,
-        m: 0x0000,
-        up: 89,
-        dn: 143,
-    }, // 087
-    ZpTableEntry {
-        p: 0x0481,
-        m: 0x0000,
-        up: 90,
-        dn: 138,
-    }, // 088
-    ZpTableEntry {
-        p: 0x3579,
-        m: 0x0000,
-        up: 91,
-        dn: 141,
-    }, // 089
-    ZpTableEntry {
-        p: 0x017a,
-        m: 0x0000,
-        up: 92,
-        dn: 112,
-    }, // 090
-    ZpTableEntry {
-        p: 0x24ef,
-        m: 0x0000,
-        up: 93,
-        dn: 135,
-    }, // 091
-    ZpTableEntry {
-        p: 0x007b,
-        m: 0x0000,
-        up: 94,
-        dn: 104,
-    }, // 092
-    ZpTableEntry {
-        p: 0x1978,
-        m: 0x0000,
-        up: 95,
-        dn: 133,
-    }, // 093
-    ZpTableEntry {
-        p: 0x0028,
-        m: 0x0000,
-        up: 96,
-        dn: 100,
-    }, // 094
-    ZpTableEntry {
-        p: 0x10ca,
-        m: 0x0000,
-        up: 97,
-        dn: 129,
-    }, // 095
-    ZpTableEntry {
-        p: 0x000d,
-        m: 0x0000,
-        up: 82,
-        dn: 98,
-    }, // 096
-    ZpTableEntry {
-        p: 0x0b5d,
-        m: 0x0000,
-        up: 99,
-        dn: 127,
-    }, // 097
-    ZpTableEntry {
-        p: 0x0034,
-        m: 0x0000,
-        up: 76,
-        dn: 72,
-    }, // 098
-    ZpTableEntry {
-        p: 0x078a,
-        m: 0x0000,
-        up: 101,
-        dn: 125,
-    }, // 099
-    ZpTableEntry {
-        p: 0x00a0,
-        m: 0x0000,
-        up: 70,
-        dn: 102,
-    }, // 100
-    ZpTableEntry {
-        p: 0x050f,
-        m: 0x0000,
-        up: 103,
-        dn: 123,
-    }, // 101
-    ZpTableEntry {
-        p: 0x0117,
-        m: 0x0000,
-        up: 66,
-        dn: 60,
-    }, // 102
-    ZpTableEntry {
-        p: 0x0358,
-        m: 0x0000,
-        up: 105,
-        dn: 121,
-    }, // 103
-    ZpTableEntry {
-        p: 0x01ea,
-        m: 0x0000,
-        up: 106,
-        dn: 110,
-    }, // 104
-    ZpTableEntry {
-        p: 0x0234,
-        m: 0x0000,
-        up: 107,
-        dn: 119,
-    }, // 105
-    ZpTableEntry {
-        p: 0x0144,
-        m: 0x0000,
-        up: 66,
-        dn: 108,
-    }, // 106
-    ZpTableEntry {
-        p: 0x0173,
-        m: 0x0000,
-        up: 109,
-        dn: 117,
-    }, // 107
-    ZpTableEntry {
-        p: 0x0234,
-        m: 0x0000,
-        up: 60,
-        dn: 54,
-    }, // 108
-    ZpTableEntry {
-        p: 0x00f5,
-        m: 0x0000,
-        up: 111,
-        dn: 115,
-    }, // 109
-    ZpTableEntry {
-        p: 0x0353,
-        m: 0x0000,
-        up: 56,
-        dn: 48,
-    }, // 110
-    ZpTableEntry {
-        p: 0x00a1,
-        m: 0x0000,
-        up: 69,
-        dn: 113,
-    }, // 111
-    ZpTableEntry {
-        p: 0x05c5,
-        m: 0x0000,
-        up: 114,
-        dn: 134,
-    }, // 112
-    ZpTableEntry {
-        p: 0x011a,
-        m: 0x0000,
-        up: 65,
-        dn: 59,
-    }, // 113
-    ZpTableEntry {
-        p: 0x03cf,
-        m: 0x0000,
-        up: 116,
-        dn: 132,
-    }, // 114
-    ZpTableEntry {
-        p: 0x01aa,
-        m: 0x0000,
-        up: 61,
-        dn: 55,
-    }, // 115
-    ZpTableEntry {
-        p: 0x0285,
-        m: 0x0000,
-        up: 118,
-        dn: 130,
-    }, // 116
-    ZpTableEntry {
-        p: 0x0286,
-        m: 0x0000,
-        up: 57,
-        dn: 51,
-    }, // 117
-    ZpTableEntry {
-        p: 0x01ab,
-        m: 0x0000,
-        up: 120,
-        dn: 128,
-    }, // 118
-    ZpTableEntry {
-        p: 0x03d3,
-        m: 0x0000,
-        up: 53,
-        dn: 47,
-    }, // 119
-    ZpTableEntry {
-        p: 0x011a,
-        m: 0x0000,
-        up: 122,
-        dn: 126,
-    }, // 120
-    ZpTableEntry {
-        p: 0x05c5,
-        m: 0x0000,
-        up: 49,
-        dn: 41,
-    }, // 121
-    ZpTableEntry {
-        p: 0x00ba,
-        m: 0x0000,
-        up: 124,
-        dn: 62,
-    }, // 122
-    ZpTableEntry {
-        p: 0x08ad,
-        m: 0x0000,
-        up: 43,
-        dn: 37,
-    }, // 123
-    ZpTableEntry {
-        p: 0x007a,
-        m: 0x0000,
-        up: 72,
-        dn: 66,
-    }, // 124
-    ZpTableEntry {
-        p: 0x0ccc,
-        m: 0x0000,
-        up: 39,
-        dn: 31,
-    }, // 125
-    ZpTableEntry {
-        p: 0x01eb,
-        m: 0x0000,
-        up: 60,
-        dn: 54,
-    }, // 126
-    ZpTableEntry {
-        p: 0x1302,
-        m: 0x0000,
-        up: 33,
-        dn: 25,
-    }, // 127
-    ZpTableEntry {
-        p: 0x02e6,
-        m: 0x0000,
-        up: 56,
-        dn: 50,
-    }, // 128
-    ZpTableEntry {
-        p: 0x1b81,
-        m: 0x0000,
-        up: 29,
-        dn: 131,
-    }, // 129
-    ZpTableEntry {
-        p: 0x045e,
-        m: 0x0000,
-        up: 52,
-        dn: 46,
-    }, // 130
-    ZpTableEntry {
-        p: 0x24ef,
-        m: 0x0000,
-        up: 23,
-        dn: 17,
-    }, // 131
-    ZpTableEntry {
-        p: 0x0690,
-        m: 0x0000,
-        up: 48,
-        dn: 40,
-    }, // 132
-    ZpTableEntry {
-        p: 0x2865,
-        m: 0x0000,
-        up: 23,
-        dn: 15,
-    }, // 133
-    ZpTableEntry {
-        p: 0x09de,
-        m: 0x0000,
-        up: 42,
-        dn: 136,
-    }, // 134
-    ZpTableEntry {
-        p: 0x3987,
-        m: 0x0000,
-        up: 137,
-        dn: 7,
-    }, // 135
-    ZpTableEntry {
-        p: 0x0dc8,
-        m: 0x0000,
-        up: 38,
-        dn: 32,
-    }, // 136
-    ZpTableEntry {
-        p: 0x2c99,
-        m: 0x0000,
-        up: 21,
-        dn: 139,
-    }, // 137
-    ZpTableEntry {
-        p: 0x10ca,
-        m: 0x0000,
-        up: 140,
-        dn: 172,
-    }, // 138
-    ZpTableEntry {
-        p: 0x3b5f,
-        m: 0x0000,
-        up: 15,
-        dn: 9,
-    }, // 139
-    ZpTableEntry {
-        p: 0x0b5d,
-        m: 0x0000,
-        up: 142,
-        dn: 170,
-    }, // 140
-    ZpTableEntry {
-        p: 0x5695,
-        m: 0x0000,
-        up: 9,
-        dn: 85,
-    }, // 141
-    ZpTableEntry {
-        p: 0x078a,
-        m: 0x0000,
-        up: 144,
-        dn: 168,
-    }, // 142
-    ZpTableEntry {
-        p: 0x8000,
-        m: 0x0000,
-        up: 141,
-        dn: 248,
-    }, // 143
-    ZpTableEntry {
-        p: 0x050f,
-        m: 0x0000,
-        up: 146,
-        dn: 166,
-    }, // 144
-    ZpTableEntry {
-        p: 0x24ee,
-        m: 0x0000,
-        up: 147,
-        dn: 247,
-    }, // 145
-    ZpTableEntry {
-        p: 0x0358,
-        m: 0x0000,
-        up: 148,
-        dn: 164,
-    }, // 146
-    ZpTableEntry {
-        p: 0x0d30,
-        m: 0x0000,
-        up: 149,
-        dn: 197,
-    }, // 147
-    ZpTableEntry {
-        p: 0x0234,
-        m: 0x0000,
-        up: 150,
-        dn: 162,
-    }, // 148
-    ZpTableEntry {
-        p: 0x0481,
-        m: 0x0000,
-        up: 151,
-        dn: 95,
-    }, // 149
-    ZpTableEntry {
-        p: 0x0173,
-        m: 0x0000,
-        up: 152,
-        dn: 160,
-    }, // 150
-    ZpTableEntry {
-        p: 0x017a,
-        m: 0x0000,
-        up: 153,
-        dn: 173,
-    }, // 151
-    ZpTableEntry {
-        p: 0x00f5,
-        m: 0x0000,
-        up: 154,
-        dn: 158,
-    }, // 152
-    ZpTableEntry {
-        p: 0x007b,
-        m: 0x0000,
-        up: 155,
-        dn: 165,
-    }, // 153
-    ZpTableEntry {
-        p: 0x00a1,
-        m: 0x0000,
-        up: 70,
-        dn: 156,
-    }, // 154
-    ZpTableEntry {
-        p: 0x0028,
-        m: 0x0000,
-        up: 157,
-        dn: 161,
-    }, // 155
-    ZpTableEntry {
-        p: 0x011a,
-        m: 0x0000,
-        up: 66,
-        dn: 60,
-    }, // 156
-    ZpTableEntry {
-        p: 0x000d,
-        m: 0x0000,
-        up: 81,
-        dn: 159,
-    }, // 157
-    ZpTableEntry {
-        p: 0x01aa,
-        m: 0x0000,
-        up: 62,
-        dn: 56,
-    }, // 158
-    ZpTableEntry {
-        p: 0x0034,
-        m: 0x0000,
-        up: 75,
-        dn: 71,
-    }, // 159
-    ZpTableEntry {
-        p: 0x0286,
-        m: 0x0000,
-        up: 58,
-        dn: 52,
-    }, // 160
-    ZpTableEntry {
-        p: 0x00a0,
-        m: 0x0000,
-        up: 69,
-        dn: 163,
-    }, // 161
-    ZpTableEntry {
-        p: 0x03d3,
-        m: 0x0000,
-        up: 54,
-        dn: 48,
-    }, // 162
-    ZpTableEntry {
-        p: 0x0117,
-        m: 0x0000,
-        up: 65,
-        dn: 59,
-    }, // 163
-    ZpTableEntry {
-        p: 0x05c5,
-        m: 0x0000,
-        up: 50,
-        dn: 42,
-    }, // 164
-    ZpTableEntry {
-        p: 0x01ea,
-        m: 0x0000,
-        up: 167,
-        dn: 171,
-    }, // 165
-    ZpTableEntry {
-        p: 0x08ad,
-        m: 0x0000,
-        up: 44,
-        dn: 38,
-    }, // 166
-    ZpTableEntry {
-        p: 0x0144,
-        m: 0x0000,
-        up: 65,
-        dn: 169,
-    }, // 167
-    ZpTableEntry {
-        p: 0x0ccc,
-        m: 0x0000,
-        up: 40,
-        dn: 32,
-    }, // 168
-    ZpTableEntry {
-        p: 0x0234,
-        m: 0x0000,
-        up: 59,
-        dn: 53,
-    }, // 169
-    ZpTableEntry {
-        p: 0x1302,
-        m: 0x0000,
-        up: 34,
-        dn: 26,
-    }, // 170
-    ZpTableEntry {
-        p: 0x0353,
-        m: 0x0000,
-        up: 55,
-        dn: 47,
-    }, // 171
-    ZpTableEntry {
-        p: 0x1b81,
-        m: 0x0000,
-        up: 30,
-        dn: 174,
-    }, // 172
-    ZpTableEntry {
-        p: 0x05c5,
-        m: 0x0000,
-        up: 175,
-        dn: 193,
-    }, // 173
-    ZpTableEntry {
-        p: 0x24ef,
-        m: 0x0000,
-        up: 24,
-        dn: 18,
-    }, // 174
-    ZpTableEntry {
-        p: 0x03cf,
-        m: 0x0000,
-        up: 177,
-        dn: 191,
-    }, // 175
-    ZpTableEntry {
-        p: 0x2b74,
-        m: 0x0000,
-        up: 178,
-        dn: 222,
-    }, // 176
-    ZpTableEntry {
-        p: 0x0285,
-        m: 0x0000,
-        up: 179,
-        dn: 189,
-    }, // 177
-    ZpTableEntry {
-        p: 0x201d,
-        m: 0x0000,
-        up: 180,
-        dn: 218,
-    }, // 178
-    ZpTableEntry {
-        p: 0x01ab,
-        m: 0x0000,
-        up: 181,
-        dn: 187,
-    }, // 179
-    ZpTableEntry {
-        p: 0x1715,
-        m: 0x0000,
-        up: 182,
-        dn: 216,
-    }, // 180
-    ZpTableEntry {
-        p: 0x011a,
-        m: 0x0000,
-        up: 183,
-        dn: 185,
-    }, // 181
-    ZpTableEntry {
-        p: 0x0fb7,
-        m: 0x0000,
-        up: 184,
-        dn: 214,
-    }, // 182
-    ZpTableEntry {
-        p: 0x00ba,
-        m: 0x0000,
-        up: 69,
-        dn: 61,
-    }, // 183
-    ZpTableEntry {
-        p: 0x0a67,
-        m: 0x0000,
-        up: 186,
-        dn: 212,
-    }, // 184
-    ZpTableEntry {
-        p: 0x01eb,
-        m: 0x0000,
-        up: 60,
-        dn: 54,
-    }, // 185
-    ZpTableEntry {
-        p: 0x06e7,
-        m: 0x0000,
-        up: 188,
-        dn: 210,
-    }, // 186
-    ZpTableEntry {
-        p: 0x02e6,
-        m: 0x0000,
-        up: 56,
-        dn: 50,
-    }, // 187
-    ZpTableEntry {
-        p: 0x0496,
-        m: 0x0000,
-        up: 190,
-        dn: 208,
-    }, // 188
-    ZpTableEntry {
-        p: 0x045e,
-        m: 0x0000,
-        up: 51,
-        dn: 45,
-    }, // 189
-    ZpTableEntry {
-        p: 0x030d,
-        m: 0x0000,
-        up: 192,
-        dn: 206,
-    }, // 190
-    ZpTableEntry {
-        p: 0x0690,
-        m: 0x0000,
-        up: 47,
-        dn: 39,
-    }, // 191
-    ZpTableEntry {
-        p: 0x0206,
-        m: 0x0000,
-        up: 194,
-        dn: 204,
-    }, // 192
-    ZpTableEntry {
-        p: 0x09de,
-        m: 0x0000,
-        up: 41,
-        dn: 195,
-    }, // 193
-    ZpTableEntry {
-        p: 0x0155,
-        m: 0x0000,
-        up: 196,
-        dn: 202,
-    }, // 194
-    ZpTableEntry {
-        p: 0x0dc8,
-        m: 0x0000,
-        up: 37,
-        dn: 31,
-    }, // 195
-    ZpTableEntry {
-        p: 0x00e1,
-        m: 0x0000,
-        up: 198,
-        dn: 200,
-    }, // 196
-    ZpTableEntry {
-        p: 0x2b74,
-        m: 0x0000,
-        up: 199,
-        dn: 243,
-    }, // 197
-    ZpTableEntry {
-        p: 0x0094,
-        m: 0x0000,
-        up: 72,
-        dn: 64,
-    }, // 198
-    ZpTableEntry {
-        p: 0x201d,
-        m: 0x0000,
-        up: 201,
-        dn: 239,
-    }, // 199
-    ZpTableEntry {
-        p: 0x0188,
-        m: 0x0000,
-        up: 62,
-        dn: 56,
-    }, // 200
-    ZpTableEntry {
-        p: 0x1715,
-        m: 0x0000,
-        up: 203,
-        dn: 237,
-    }, // 201
-    ZpTableEntry {
-        p: 0x0252,
-        m: 0x0000,
-        up: 58,
-        dn: 52,
-    }, // 202
-    ZpTableEntry {
-        p: 0x0fb7,
-        m: 0x0000,
-        up: 205,
-        dn: 235,
-    }, // 203
-    ZpTableEntry {
-        p: 0x0383,
-        m: 0x0000,
-        up: 54,
-        dn: 48,
-    }, // 204
-    ZpTableEntry {
-        p: 0x0a67,
-        m: 0x0000,
-        up: 207,
-        dn: 233,
-    }, // 205
-    ZpTableEntry {
-        p: 0x0547,
-        m: 0x0000,
-        up: 50,
-        dn: 44,
-    }, // 206
-    ZpTableEntry {
-        p: 0x06e7,
-        m: 0x0000,
-        up: 209,
-        dn: 231,
-    }, // 207
-    ZpTableEntry {
-        p: 0x07e2,
-        m: 0x0000,
-        up: 46,
-        dn: 38,
-    }, // 208
-    ZpTableEntry {
-        p: 0x0496,
-        m: 0x0000,
-        up: 211,
-        dn: 229,
-    }, // 209
-    ZpTableEntry {
-        p: 0x0bc0,
-        m: 0x0000,
-        up: 40,
-        dn: 34,
-    }, // 210
-    ZpTableEntry {
-        p: 0x030d,
-        m: 0x0000,
-        up: 213,
-        dn: 227,
-    }, // 211
-    ZpTableEntry {
-        p: 0x1178,
-        m: 0x0000,
-        up: 36,
-        dn: 28,
-    }, // 212
-    ZpTableEntry {
-        p: 0x0206,
-        m: 0x0000,
-        up: 215,
-        dn: 225,
-    }, // 213
-    ZpTableEntry {
-        p: 0x19da,
-        m: 0x0000,
-        up: 30,
-        dn: 22,
-    }, // 214
-    ZpTableEntry {
-        p: 0x0155,
-        m: 0x0000,
-        up: 217,
-        dn: 223,
-    }, // 215
-    ZpTableEntry {
-        p: 0x24ef,
-        m: 0x0000,
-        up: 26,
-        dn: 16,
-    }, // 216
-    ZpTableEntry {
-        p: 0x00e1,
-        m: 0x0000,
-        up: 219,
-        dn: 221,
-    }, // 217
-    ZpTableEntry {
-        p: 0x320e,
-        m: 0x0000,
-        up: 20,
-        dn: 220,
-    }, // 218
-    ZpTableEntry {
-        p: 0x0094,
-        m: 0x0000,
-        up: 71,
-        dn: 63,
-    }, // 219
-    ZpTableEntry {
-        p: 0x432a,
-        m: 0x0000,
-        up: 14,
-        dn: 8,
-    }, // 220
-    ZpTableEntry {
-        p: 0x0188,
-        m: 0x0000,
-        up: 61,
-        dn: 55,
-    }, // 221
-    ZpTableEntry {
-        p: 0x447d,
-        m: 0x0000,
-        up: 14,
-        dn: 224,
-    }, // 222
-    ZpTableEntry {
-        p: 0x0252,
-        m: 0x0000,
-        up: 57,
-        dn: 51,
-    }, // 223
-    ZpTableEntry {
-        p: 0x5ece,
-        m: 0x0000,
-        up: 8,
-        dn: 2,
-    }, // 224
-    ZpTableEntry {
-        p: 0x0383,
-        m: 0x0000,
-        up: 53,
-        dn: 47,
-    }, // 225
-    ZpTableEntry {
-        p: 0x8000,
-        m: 0x0000,
-        up: 228,
-        dn: 87,
-    }, // 226
-    ZpTableEntry {
-        p: 0x0547,
-        m: 0x0000,
-        up: 49,
-        dn: 43,
-    }, // 227
-    ZpTableEntry {
-        p: 0x481a,
-        m: 0x0000,
-        up: 230,
-        dn: 246,
-    }, // 228
-    ZpTableEntry {
-        p: 0x07e2,
-        m: 0x0000,
-        up: 45,
-        dn: 37,
-    }, // 229
-    ZpTableEntry {
-        p: 0x3579,
-        m: 0x0000,
-        up: 232,
-        dn: 244,
-    }, // 230
-    ZpTableEntry {
-        p: 0x0bc0,
-        m: 0x0000,
-        up: 39,
-        dn: 33,
-    }, // 231
-    ZpTableEntry {
-        p: 0x24ef,
-        m: 0x0000,
-        up: 234,
-        dn: 238,
-    }, // 232
-    ZpTableEntry {
-        p: 0x1178,
-        m: 0x0000,
-        up: 35,
-        dn: 27,
-    }, // 233
-    ZpTableEntry {
-        p: 0x1978,
-        m: 0x0000,
-        up: 138,
-        dn: 236,
-    }, // 234
-    ZpTableEntry {
-        p: 0x19da,
-        m: 0x0000,
-        up: 29,
-        dn: 21,
-    }, // 235
-    ZpTableEntry {
-        p: 0x2865,
-        m: 0x0000,
-        up: 24,
-        dn: 16,
-    }, // 236
-    ZpTableEntry {
-        p: 0x24ef,
-        m: 0x0000,
-        up: 25,
-        dn: 15,
-    }, // 237
-    ZpTableEntry {
-        p: 0x3987,
-        m: 0x0000,
-        up: 240,
-        dn: 8,
-    }, // 238
-    ZpTableEntry {
-        p: 0x320e,
-        m: 0x0000,
-        up: 19,
-        dn: 241,
-    }, // 239
-    ZpTableEntry {
-        p: 0x2c99,
-        m: 0x0000,
-        up: 22,
-        dn: 242,
-    }, // 240
-    ZpTableEntry {
-        p: 0x432a,
-        m: 0x0000,
-        up: 13,
-        dn: 7,
-    }, // 241
-    ZpTableEntry {
-        p: 0x3b5f,
-        m: 0x0000,
-        up: 16,
-        dn: 10,
-    }, // 242
-    ZpTableEntry {
-        p: 0x447d,
-        m: 0x0000,
-        up: 13,
-        dn: 245,
-    }, // 243
-    ZpTableEntry {
-        p: 0x5695,
-        m: 0x0000,
-        up: 10,
-        dn: 2,
-    }, // 244
-    ZpTableEntry {
-        p: 0x5ece,
-        m: 0x0000,
-        up: 7,
-        dn: 1,
-    }, // 245
-    ZpTableEntry {
-        p: 0x8000,
-        m: 0x0000,
-        up: 244,
-        dn: 83,
-    }, // 246
-    ZpTableEntry {
-        p: 0x8000,
-        m: 0x0000,
-        up: 249,
-        dn: 250,
-    }, // 247
-    ZpTableEntry {
-        p: 0x5695,
-        m: 0x0000,
-        up: 10,
-        dn: 2,
-    }, // 248
-    ZpTableEntry {
-        p: 0x481a,
-        m: 0x0000,
-        up: 89,
-        dn: 143,
-    }, // 249
-    ZpTableEntry {
-        p: 0x481a,
-        m: 0x0000,
-        up: 230,
-        dn: 246,
-    }, // 250
-    ZpTableEntry {
-        p: 0x0000,
-        m: 0x0000,
-        up: 0,
-        dn: 0,
-    }, // 251: (unused)
-    ZpTableEntry {
-        p: 0x0000,
-        m: 0x0000,
-        up: 0,
-        dn: 0,
-    }, // 252: (unused)
-    ZpTableEntry {
-        p: 0x0000,
-        m: 0x0000,
-        up: 0,
-        dn: 0,
-    }, // 253: (unused)
-    ZpTableEntry {
-        p: 0x0000,
-        m: 0x0000,
-        up: 0,
-        dn: 0,
-    }, // 254: (unused)
-    ZpTableEntry {
-        p: 0x0000,
-        m: 0x0000,
-        up: 0,
-        dn: 0,
-    }, // 255: (unused)
+/// The Z-Coder probability table with 251 entries (0-250)
+pub const DEFAULT_ZP_TABLE: [ZpTableEntry; 251] = [
+
+
+zp!(0x8000, 0x0000, 84, 139), // 000: p=0.500000 (    0,    0)
+zp!(0x8000, 0x0000, 3, 4), // 001: p=0.500000 (    0,    0)
+zp!(0x8000, 0x0000, 4, 3), // 002: p=0.500000 (    0,    0)
+zp!(0x7399, 0x10a5, 5, 1), // 003: p=0.465226 (    0,    0)
+zp!(0x7399, 0x10a5, 6, 2), // 004: p=0.465226 (    0,    0)
+zp!(0x6813, 0x1f28, 7, 3), // 005: p=0.430708 (    0,    0)
+zp!(0x6813, 0x1f28, 8, 4), // 006: p=0.430708 (    0,    0)
+zp!(0x5d65, 0x2bd3, 9, 5), // 007: p=0.396718 (    0,    0)
+zp!(0x5d65, 0x2bd3, 10, 6), // 008: p=0.396718 (    0,    0)
+zp!(0x5387, 0x36e3, 11, 7), // 009: p=0.363535 (    0,    0)
+zp!(0x5387, 0x36e3, 12, 8), // 010: p=0.363535 (    0,    0)
+zp!(0x4a73, 0x408c, 13, 9), // 011: p=0.331418 (    0,    0)
+zp!(0x4a73, 0x408c, 14, 10), // 012: p=0.331418 (    0,    0)
+zp!(0x421f, 0x48fe, 15, 11), // 013: p=0.300562 (    0,    0)
+zp!(0x421f, 0x48fe, 16, 12), // 014: p=0.300562 (    0,    0)
+zp!(0x3a85, 0x5060, 17, 13), // 015: p=0.271166 (    0,    0)
+zp!(0x3a85, 0x5060, 18, 14), // 016: p=0.271166 (    0,    0)
+zp!(0x339b, 0x56d3, 19, 15), // 017: p=0.243389 (    0,    0)
+zp!(0x339b, 0x56d3, 20, 16), // 018: p=0.243389 (    0,    0)
+zp!(0x2d59, 0x5c73, 21, 17), // 019: p=0.217351 (    0,    0)
+zp!(0x2d59, 0x5c73, 22, 18), // 020: p=0.217351 (    0,    0)
+zp!(0x27b3, 0x615e, 23, 19), // 021: p=0.193091 (    0,    0)
+zp!(0x27b3, 0x615e, 24, 20), // 022: p=0.193091 (    0,    0)
+zp!(0x22a1, 0x65a7, 25, 21), // 023: p=0.170683 (    0,    0)
+zp!(0x22a1, 0x65a7, 26, 22), // 024: p=0.170683 (    0,    0)
+zp!(0x1e19, 0x6963, 27, 23), // 025: p=0.150134 (    0,    0)
+zp!(0x1e19, 0x6963, 28, 24), // 026: p=0.150134 (    0,    0)
+zp!(0x1a0f, 0x6ca3, 29, 25), // 027: p=0.131397 (    0,    0)
+zp!(0x1a0f, 0x6ca3, 30, 26), // 028: p=0.131397 (    0,    0)
+zp!(0x167b, 0x6f75, 31, 27), // 029: p=0.114441 (    0,    0)
+zp!(0x167b, 0x6f75, 32, 28), // 030: p=0.114441 (    0,    0)
+zp!(0x1353, 0x71e6, 33, 29), // 031: p=0.099214 (    0,    0)
+zp!(0x1353, 0x71e6, 34, 30), // 032: p=0.099214 (    0,    0)
+zp!(0x108d, 0x7403, 35, 31), // 033: p=0.085616 (    0,    0)
+zp!(0x108d, 0x7403, 36, 32), // 034: p=0.085616 (    0,    0)
+zp!(0x0e1f, 0x75d7, 37, 33), // 035: p=0.073525 (    0,    0)
+zp!(0x0e1f, 0x75d7, 38, 34), // 036: p=0.073525 (    0,    0)
+zp!(0x0c01, 0x7769, 39, 35), // 037: p=0.062871 (    0,    0)
+zp!(0x0c01, 0x7769, 40, 36), // 038: p=0.062871 (    0,    0)
+zp!(0x0a2b, 0x78c2, 41, 37), // 039: p=0.053524 (    0,    0)
+zp!(0x0a2b, 0x78c2, 42, 38), // 040: p=0.053524 (    0,    0)
+zp!(0x0895, 0x79ea, 43, 39), // 041: p=0.045374 (    0,    0)
+zp!(0x0895, 0x79ea, 44, 40), // 042: p=0.045374 (    0,    0)
+zp!(0x0737, 0x7ae7, 45, 41), // 043: p=0.038280 (    0,    0)
+zp!(0x0737, 0x7ae7, 46, 42), // 044: p=0.038280 (    0,    0)
+zp!(0x060b, 0x7bbe, 47, 43), // 045: p=0.032175 (    0,    0)
+zp!(0x060b, 0x7bbe, 48, 44), // 046: p=0.032175 (    0,    0)
+zp!(0x050b, 0x7c75, 49, 45), // 047: p=0.026926 (    0,    0)
+zp!(0x050b, 0x7c75, 50, 46), // 048: p=0.026926 (    0,    0)
+zp!(0x0431, 0x7d10, 51, 47), // 049: p=0.022430 (    0,    0)
+zp!(0x0431, 0x7d10, 52, 48), // 050: p=0.022430 (    0,    0)
+zp!(0x0379, 0x7d92, 53, 49), // 051: p=0.018623 (    0,    0)
+zp!(0x0379, 0x7d92, 54, 50), // 052: p=0.018623 (    0,    0)
+zp!(0x02dd, 0x7dff, 55, 51), // 053: p=0.015386 (    0,    0)
+zp!(0x02dd, 0x7dff, 56, 52), // 054: p=0.015386 (    0,    0)
+zp!(0x025b, 0x7e5b, 57, 53), // 055: p=0.012671 (    0,    0)
+zp!(0x025b, 0x7e5b, 58, 54), // 056: p=0.012671 (    0,    0)
+zp!(0x01ef, 0x7ea7, 59, 55), // 057: p=0.010414 (    0,    0)
+zp!(0x01ef, 0x7ea7, 60, 56), // 058: p=0.010414 (    0,    0)
+zp!(0x0195, 0x7ee6, 61, 57), // 059: p=0.008529 (    0,    0)
+zp!(0x0195, 0x7ee6, 62, 58), // 060: p=0.008529 (    0,    0)
+zp!(0x0149, 0x7f1b, 63, 59), // 061: p=0.006935 (    0,    0)
+zp!(0x0149, 0x7f1b, 64, 60), // 062: p=0.006935 (    0,    0)
+zp!(0x010b, 0x7f46, 65, 61), // 063: p=0.005631 (    0,    0)
+zp!(0x010b, 0x7f46, 66, 62), // 064: p=0.005631 (    0,    0)
+zp!(0x00d5, 0x7f6c, 67, 63), // 065: p=0.004495 (    0,    0)
+zp!(0x00d5, 0x7f6c, 68, 64), // 066: p=0.004495 (    0,    0)
+zp!(0x00a5, 0x7f8d, 69, 65), // 067: p=0.003484 (    0,    0)
+zp!(0x00a5, 0x7f8d, 70, 66), // 068: p=0.003484 (    0,    0)
+zp!(0x007b, 0x7faa, 71, 67), // 069: p=0.002592 (    0,    0)
+zp!(0x007b, 0x7faa, 72, 68), // 070: p=0.002592 (    0,    0)
+zp!(0x0057, 0x7fc3, 73, 69), // 071: p=0.001835 (    0,    0)
+zp!(0x0057, 0x7fc3, 74, 70), // 072: p=0.001835 (    0,    0)
+zp!(0x0039, 0x7fd8, 75, 71), // 073: p=0.001211 (    0,    0)
+zp!(0x0039, 0x7fd8, 76, 72), // 074: p=0.001211 (    0,    0)
+zp!(0x0023, 0x7fe7, 77, 73), // 075: p=0.000740 (    0,    0)
+zp!(0x0023, 0x7fe7, 78, 74), // 076: p=0.000740 (    0,    0)
+zp!(0x0013, 0x7ff2, 79, 75), // 077: p=0.000402 (    0,    0)
+zp!(0x0013, 0x7ff2, 80, 76), // 078: p=0.000402 (    0,    0)
+zp!(0x0007, 0x7ffa, 81, 77), // 079: p=0.000153 (    0,    0)
+zp!(0x0007, 0x7ffa, 82, 78), // 080: p=0.000153 (    0,    0)
+zp!(0x0001, 0x7fff, 81, 79), // 081: p=0.000027 (    0,    0)
+zp!(0x0001, 0x7fff, 82, 80), // 082: p=0.000027 (    0,    0)
+zp!(0x620b, 0x0000, 9, 85), // 083: p=0.411764 (    2,    3)
+zp!(0x294a, 0x0000, 86, 216), // 084: p=0.199988 (    1,    0)
+zp!(0x8000, 0x0000, 5, 6), // 085: p=0.500000 (    3,    3)
+zp!(0x0db3, 0x0000, 88, 168), // 086: p=0.071422 (    4,    0)
+zp!(0x538e, 0x0000, 89, 137), // 087: p=0.363634 (    1,    2)
+zp!(0x0490, 0x0000, 90, 134), // 088: p=0.024388 (   13,    0)
+zp!(0x3e3e, 0x0000, 91, 135), // 089: p=0.285711 (    1,    3)
+zp!(0x017c, 0x0000, 92, 112), // 090: p=0.007999 (   41,    0)
+zp!(0x294a, 0x0000, 93, 133), // 091: p=0.199997 (    1,    5)
+zp!(0x007c, 0x0000, 94, 104), // 092: p=0.002611 (  127,    0)
+zp!(0x1b75, 0x0000, 95, 131), // 093: p=0.137929 (    1,    8)
+zp!(0x0028, 0x0000, 96, 100), // 094: p=0.000849 (  392,    0)
+zp!(0x12fc, 0x0000, 97, 129), // 095: p=0.097559 (    1,   12)
+zp!(0x000d, 0x0000, 82, 98), // 096: p=0.000276 ( 1208,    0)
+zp!(0x0cfb, 0x0000, 99, 125), // 097: p=0.067795 (    1,   18)
+zp!(0x0034, 0x0000, 76, 72), // 098: p=0.001102 ( 1208,    1)
+zp!(0x08cd, 0x0000, 101, 123), // 099: p=0.046511 (    1,   27)
+zp!(0x00a0, 0x0000, 70, 102), // 100: p=0.003387 (  392,    1)
+zp!(0x05de, 0x0000, 103, 119), // 101: p=0.031249 (    1,   41)
+zp!(0x0118, 0x0000, 66, 60), // 102: p=0.005912 (  392,    2)
+zp!(0x03e9, 0x0000, 105, 117), // 103: p=0.020942 (    1,   62)
+zp!(0x01ed, 0x0000, 106, 110), // 104: p=0.010362 (  127,    1)
+zp!(0x0298, 0x0000, 107, 115), // 105: p=0.013937 (    1,   94)
+zp!(0x0145, 0x0000, 66, 108), // 106: p=0.006849 (  193,    1)
+zp!(0x01b6, 0x0000, 109, 113), // 107: p=0.009216 (    1,  143)
+zp!(0x0237, 0x0000, 60, 54), // 108: p=0.011925 (  193,    2)
+zp!(0x0121, 0x0000, 65, 111), // 109: p=0.006097 (    1,  217)
+zp!(0x035b, 0x0000, 56, 48), // 110: p=0.017995 (  127,    2)
+zp!(0x01f9, 0x0000, 59, 53), // 111: p=0.010622 (    2,  217)
+zp!(0x05de, 0x0000, 114, 130), // 112: p=0.031249 (   41,    1)
+zp!(0x02fc, 0x0000, 55, 49), // 113: p=0.016018 (    2,  143)
+zp!(0x03e9, 0x0000, 116, 128), // 114: p=0.020942 (   62,    1)
+zp!(0x0484, 0x0000, 51, 45), // 115: p=0.024138 (    2,   94)
+zp!(0x0298, 0x0000, 118, 126), // 116: p=0.013937 (   94,    1)
+zp!(0x06ca, 0x0000, 47, 39), // 117: p=0.036082 (    2,   62)
+zp!(0x01b6, 0x0000, 120, 124), // 118: p=0.009216 (  143,    1)
+zp!(0x0a27, 0x0000, 41, 121), // 119: p=0.053434 (    2,   41)
+zp!(0x0121, 0x0000, 66, 122), // 120: p=0.006097 (  217,    1)
+zp!(0x0e57, 0x0000, 37, 31), // 121: p=0.074626 (    3,   41)
+zp!(0x01f9, 0x0000, 60, 54), // 122: p=0.010622 (  217,    2)
+zp!(0x0f25, 0x0000, 37, 29), // 123: p=0.078651 (    2,   27)
+zp!(0x02fc, 0x0000, 56, 50), // 124: p=0.016018 (  143,    2)
+zp!(0x1629, 0x0000, 33, 127), // 125: p=0.112902 (    2,   18)
+zp!(0x0484, 0x0000, 52, 46), // 126: p=0.024138 (   94,    2)
+zp!(0x1ee8, 0x0000, 27, 21), // 127: p=0.153845 (    3,   18)
+zp!(0x06ca, 0x0000, 48, 40), // 128: p=0.036082 (   62,    2)
+zp!(0x200f, 0x0000, 27, 19), // 129: p=0.159089 (    2,   12)
+zp!(0x0a27, 0x0000, 42, 132), // 130: p=0.053434 (   41,    2)
+zp!(0x2dae, 0x0000, 21, 15), // 131: p=0.218748 (    2,    8)
+zp!(0x0e57, 0x0000, 38, 32), // 132: p=0.074626 (   41,    3)
+zp!(0x4320, 0x0000, 15, 7), // 133: p=0.304346 (    2,    5)
+zp!(0x11a0, 0x0000, 136, 164), // 134: p=0.090907 (   13,    1)
+zp!(0x620b, 0x0000, 9, 85), // 135: p=0.411764 (    2,    3)
+zp!(0x0bbe, 0x0000, 138, 162), // 136: p=0.061537 (   20,    1)
+zp!(0x8000, 0x0000, 135, 248), // 137: p=0.500000 (    2,    2)
+zp!(0x07f3, 0x0000, 140, 160), // 138: p=0.042104 (   30,    1)
+zp!(0x294a, 0x0000, 141, 247), // 139: p=0.199988 (    0,    1)
+zp!(0x053e, 0x0000, 142, 158), // 140: p=0.027971 (   46,    1)
+zp!(0x0db3, 0x0000, 143, 199), // 141: p=0.071422 (    0,    4)
+zp!(0x0378, 0x0000, 144, 156), // 142: p=0.018604 (   70,    1)
+zp!(0x0490, 0x0000, 145, 167), // 143: p=0.024388 (    0,   13)
+zp!(0x024d, 0x0000, 146, 154), // 144: p=0.012384 (  106,    1)
+zp!(0x017c, 0x0000, 147, 101), // 145: p=0.007999 (    0,   41)
+zp!(0x0185, 0x0000, 148, 152), // 146: p=0.008197 (  161,    1)
+zp!(0x007c, 0x0000, 149, 159), // 147: p=0.002611 (    0,  127)
+zp!(0x0100, 0x0000, 68, 150), // 148: p=0.005405 (  245,    1)
+zp!(0x0028, 0x0000, 151, 155), // 149: p=0.000849 (    0,  392)
+zp!(0x01c0, 0x0000, 62, 56), // 150: p=0.009421 (  245,    2)
+zp!(0x000d, 0x0000, 81, 153), // 151: p=0.000276 (    0, 1208)
+zp!(0x02a7, 0x0000, 58, 52), // 152: p=0.014256 (  161,    2)
+zp!(0x0034, 0x0000, 75, 71), // 153: p=0.001102 (    1, 1208)
+zp!(0x0403, 0x0000, 54, 46), // 154: p=0.021472 (  106,    2)
+zp!(0x00a0, 0x0000, 69, 157), // 155: p=0.003387 (    1,  392)
+zp!(0x0608, 0x0000, 48, 42), // 156: p=0.032110 (   70,    2)
+zp!(0x0118, 0x0000, 65, 59), // 157: p=0.005912 (    2,  392)
+zp!(0x0915, 0x0000, 44, 38), // 158: p=0.047945 (   46,    2)
+zp!(0x01ed, 0x0000, 161, 165), // 159: p=0.010362 (    1,  127)
+zp!(0x0db4, 0x0000, 40, 32), // 160: p=0.071428 (   30,    2)
+zp!(0x0145, 0x0000, 65, 163), // 161: p=0.006849 (    1,  193)
+zp!(0x1417, 0x0000, 34, 26), // 162: p=0.102940 (   20,    2)
+zp!(0x0237, 0x0000, 59, 53), // 163: p=0.011925 (    2,  193)
+zp!(0x1dd6, 0x0000, 30, 166), // 164: p=0.148935 (   13,    2)
+zp!(0x035b, 0x0000, 55, 47), // 165: p=0.017995 (    2,  127)
+zp!(0x294a, 0x0000, 24, 18), // 166: p=0.199999 (   13,    3)
+zp!(0x11a0, 0x0000, 169, 195), // 167: p=0.090907 (    1,   13)
+zp!(0x31a3, 0x0000, 170, 212), // 168: p=0.235291 (    4,    1)
+zp!(0x0bbe, 0x0000, 171, 193), // 169: p=0.061537 (    1,   20)
+zp!(0x235a, 0x0000, 172, 208), // 170: p=0.173910 (    6,    1)
+zp!(0x07f3, 0x0000, 173, 191), // 171: p=0.042104 (    1,   30)
+zp!(0x18b3, 0x0000, 174, 206), // 172: p=0.124998 (    9,    1)
+zp!(0x053e, 0x0000, 175, 189), // 173: p=0.027971 (    1,   46)
+zp!(0x1073, 0x0000, 176, 204), // 174: p=0.085105 (   14,    1)
+zp!(0x0378, 0x0000, 177, 187), // 175: p=0.018604 (    1,   70)
+zp!(0x0b35, 0x0000, 178, 200), // 176: p=0.058822 (   21,    1)
+zp!(0x024d, 0x0000, 179, 185), // 177: p=0.012384 (    1,  106)
+zp!(0x0778, 0x0000, 180, 198), // 178: p=0.039603 (   32,    1)
+zp!(0x0185, 0x0000, 181, 183), // 179: p=0.008197 (    1,  161)
+zp!(0x04ed, 0x0000, 182, 194), // 180: p=0.026315 (   49,    1)
+zp!(0x0100, 0x0000, 67, 59), // 181: p=0.005405 (    1,  245)
+zp!(0x0349, 0x0000, 184, 192), // 182: p=0.017621 (   74,    1)
+zp!(0x02a7, 0x0000, 57, 51), // 183: p=0.014256 (    2,  161)
+zp!(0x022e, 0x0000, 186, 190), // 184: p=0.011730 (  112,    1)
+zp!(0x0403, 0x0000, 53, 45), // 185: p=0.021472 (    2,  106)
+zp!(0x0171, 0x0000, 64, 188), // 186: p=0.007767 (  170,    1)
+zp!(0x0608, 0x0000, 47, 41), // 187: p=0.032110 (    2,   70)
+zp!(0x0283, 0x0000, 58, 52), // 188: p=0.013513 (  170,    2)
+zp!(0x0915, 0x0000, 43, 37), // 189: p=0.047945 (    2,   46)
+zp!(0x03cc, 0x0000, 54, 48), // 190: p=0.020349 (  112,    2)
+zp!(0x0db4, 0x0000, 39, 31), // 191: p=0.071428 (    2,   30)
+zp!(0x05b6, 0x0000, 50, 42), // 192: p=0.030434 (   74,    2)
+zp!(0x1417, 0x0000, 33, 25), // 193: p=0.102940 (    2,   20)
+zp!(0x088a, 0x0000, 44, 196), // 194: p=0.045161 (   49,    2)
+zp!(0x1dd6, 0x0000, 29, 197), // 195: p=0.148935 (    2,   13)
+zp!(0x0c16, 0x0000, 40, 34), // 196: p=0.063291 (   49,    3)
+zp!(0x294a, 0x0000, 23, 17), // 197: p=0.199999 (    3,   13)
+zp!(0x0ce2, 0x0000, 40, 32), // 198: p=0.067307 (   32,    2)
+zp!(0x31a3, 0x0000, 201, 243), // 199: p=0.235291 (    1,    4)
+zp!(0x1332, 0x0000, 36, 202), // 200: p=0.098590 (   21,    2)
+zp!(0x235a, 0x0000, 203, 239), // 201: p=0.173910 (    1,    6)
+zp!(0x1adc, 0x0000, 30, 24), // 202: p=0.135134 (   21,    3)
+zp!(0x18b3, 0x0000, 205, 237), // 203: p=0.124998 (    1,    9)
+zp!(0x1be7, 0x0000, 30, 22), // 204: p=0.139999 (   14,    2)
+zp!(0x1073, 0x0000, 207, 235), // 205: p=0.085105 (    1,   14)
+zp!(0x294a, 0x0000, 26, 16), // 206: p=0.199998 (    9,    2)
+zp!(0x0b35, 0x0000, 209, 231), // 207: p=0.058822 (    1,   21)
+zp!(0x3a07, 0x0000, 20, 210), // 208: p=0.269229 (    6,    2)
+zp!(0x0778, 0x0000, 211, 229), // 209: p=0.039603 (    1,   32)
+zp!(0x4e30, 0x0000, 14, 8), // 210: p=0.344827 (    6,    3)
+zp!(0x04ed, 0x0000, 213, 225), // 211: p=0.026315 (    1,   49)
+zp!(0x4fa6, 0x0000, 14, 214), // 212: p=0.349998 (    4,    2)
+zp!(0x0349, 0x0000, 215, 223), // 213: p=0.017621 (    1,   74)
+zp!(0x6966, 0x0000, 8, 2), // 214: p=0.434782 (    4,    3)
+zp!(0x022e, 0x0000, 217, 221), // 215: p=0.011730 (    1,  112)
+zp!(0x8000, 0x0000, 218, 87), // 216: p=0.500000 (    1,    1)
+zp!(0x0171, 0x0000, 63, 219), // 217: p=0.007767 (    1,  170)
+zp!(0x538e, 0x0000, 220, 246), // 218: p=0.363634 (    2,    1)
+zp!(0x0283, 0x0000, 57, 51), // 219: p=0.013513 (    2,  170)
+zp!(0x3e3e, 0x0000, 222, 244), // 220: p=0.285711 (    3,    1)
+zp!(0x03cc, 0x0000, 53, 47), // 221: p=0.020349 (    2,  112)
+zp!(0x294a, 0x0000, 224, 242), // 222: p=0.199997 (    5,    1)
+zp!(0x05b6, 0x0000, 49, 41), // 223: p=0.030434 (    2,   74)
+zp!(0x1b75, 0x0000, 226, 240), // 224: p=0.137929 (    8,    1)
+zp!(0x088a, 0x0000, 43, 227), // 225: p=0.045161 (    2,   49)
+zp!(0x12fc, 0x0000, 228, 238), // 226: p=0.097559 (   12,    1)
+zp!(0x0c16, 0x0000, 39, 33), // 227: p=0.063291 (    3,   49)
+zp!(0x0cfb, 0x0000, 230, 234), // 228: p=0.067795 (   18,    1)
+zp!(0x0ce2, 0x0000, 39, 31), // 229: p=0.067307 (    2,   32)
+zp!(0x08cd, 0x0000, 112, 232), // 230: p=0.046511 (   27,    1)
+zp!(0x1332, 0x0000, 35, 233), // 231: p=0.098590 (    2,   21)
+zp!(0x0f25, 0x0000, 38, 30), // 232: p=0.078651 (   27,    2)
+zp!(0x1adc, 0x0000, 29, 23), // 233: p=0.135134 (    3,   21)
+zp!(0x1629, 0x0000, 34, 236), // 234: p=0.112902 (   18,    2)
+zp!(0x1be7, 0x0000, 29, 21), // 235: p=0.139999 (    2,   14)
+zp!(0x1ee8, 0x0000, 28, 22), // 236: p=0.153845 (   18,    3)
+zp!(0x294a, 0x0000, 25, 15), // 237: p=0.199998 (    2,    9)
+zp!(0x200f, 0x0000, 28, 20), // 238: p=0.159089 (   12,    2)
+zp!(0x3a07, 0x0000, 19, 241), // 239: p=0.269229 (    2,    6)
+zp!(0x2dae, 0x0000, 22, 16), // 240: p=0.218748 (    8,    2)
+zp!(0x4e30, 0x0000, 13, 7), // 241: p=0.344827 (    3,    6)
+zp!(0x4320, 0x0000, 16, 8), // 242: p=0.304346 (    5,    2)
+zp!(0x4fa6, 0x0000, 13, 245), // 243: p=0.349998 (    2,    4)
+zp!(0x620b, 0x0000, 10, 2), // 244: p=0.411764 (    3,    2)
+zp!(0x6966, 0x0000, 7, 1), // 245: p=0.434782 (    3,    4)
+zp!(0x8000, 0x0000, 244, 83), // 246: p=0.500000 (    2,    2)
+zp!(0x8000, 0x0000, 249, 250), // 247: p=0.500000 (    1,    1)
+zp!(0x620b, 0x0000, 10, 2), // 248: p=0.411764 (    3,    2)
+zp!(0x538e, 0x0000, 89, 137), // 249: p=0.363634 (    1,    2)
+zp!(0x538e, 0x0000, 220, 246), // 250: p=0.363634 (    2,    1)
 ];

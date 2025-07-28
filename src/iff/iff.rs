@@ -104,8 +104,8 @@ impl<T: Write + Seek> WriteSeek for T {}
 
 pub struct IffWriter<'a> {
     writer: Box<dyn WriteSeek + 'a>,
-    // Stack of (size_field_position, payload_start_position)
-    chunk_stack: Vec<(u64, u64)>,
+    // Stack of (size_field_position, payload_start_position, is_composite)
+    chunk_stack: Vec<(u64, u64, bool)>,
 }
 
 impl<'a> IffWriter<'a> {
@@ -139,8 +139,9 @@ impl<'a> IffWriter<'a> {
         Ok(size_pos)
     }
 
-    /// Patches the size of a chunk at a previously saved position.
-    /// Calculates size from `size_pos` to current stream position, writes it, and adds padding.
+    /// Identical logic for the rare direct-patch helper
+    /// Note: This method cannot distinguish between composite and simple chunks,
+    /// so it may not work correctly for composite chunks. Use put_chunk/close_chunk instead.
     pub fn patch_chunk_size(&mut self, size_pos: u64) -> Result<()> {
         let end_pos = self.writer.stream_position()?;
         // The content size is everything from after the size field to the current position.
@@ -167,6 +168,7 @@ impl<'a> IffWriter<'a> {
     /// The writer is now positioned to write the chunk's payload.
     pub fn put_chunk(&mut self, full_id: &str) -> Result<()> {
         let (id, secondary_id) = Self::parse_full_id(full_id)?;
+        let is_composite = secondary_id.is_some();
 
         self.writer.write_all(&id)?;
 
@@ -183,41 +185,42 @@ impl<'a> IffWriter<'a> {
             self.writer.stream_position()?
         };
 
-        self.chunk_stack.push((size_pos, payload_start_pos));
+        self.chunk_stack.push((size_pos, payload_start_pos, is_composite));
 
         Ok(())
     }
 
     /// Finishes the most recently opened chunk.
     ///
-    /// This calculates the chunk's size, seeks back to the header, writes the
-    /// correct size, and adds a padding byte if necessary to ensure the chunk
-    /// ends on an even boundary.
+    /// For composite chunks, the size includes the 4-byte secondary id
+    /// to match the DjVu specification and standard IFF format.
     pub fn close_chunk(&mut self) -> Result<()> {
-        let (size_pos, payload_start_pos) = self.chunk_stack.pop().ok_or_else(|| {
-            DjvuError::InvalidOperation("Cannot close chunk: no chunk is open.".to_string())
-        })?;
+        let (size_pos, payload_start_pos, is_composite) = self.chunk_stack.pop()
+            .ok_or_else(|| DjvuError::InvalidOperation("close_chunk: no open chunk".into()))?;
 
-        // Calculate the size of the chunk payload.
-        let end_pos = self.writer.stream_position()?;
-        let payload_len = end_pos - payload_start_pos;
-        let chunk_size_field = end_pos - (size_pos + 4);
+        let mut end_pos = self.writer.stream_position()?;
+        
+        // Calculate the size field value
+        // For composite chunks: include the secondary ID (full payload from after size field)
+        // For simple chunks: exclude nothing (payload from after size field)
+        let size_calculation_start = if is_composite {
+            size_pos + 4  // Start counting from after the size field (includes secondary ID)
+        } else {
+            payload_start_pos  // Start counting from after the size field (no secondary ID)
+        };
+        
+        let chunk_size_field = end_pos - size_calculation_start;
 
-        // IFF requires chunk data to be padded to an even length.
-        // The review indicates this should be based on the payload length.
-        if (payload_len & 1) != 0 {
+        // IFF: pad to even overall size, but byte is **not** counted
+        if (chunk_size_field & 1) != 0 {
             self.writer.write_all(&[0])?;
+            end_pos += 1;
         }
 
-        // Get final position after potential padding
-        let final_pos = self.writer.stream_position()?;
-
-        // Seek back, write the correct size, and return to the final position.
+        // Patch the size field and restore position
         self.writer.seek(SeekFrom::Start(size_pos))?;
-        self.writer
-            .write_u32::<BigEndian>(chunk_size_field as u32)?;
-        self.writer.seek(SeekFrom::Start(final_pos))?;
-
+        self.writer.write_u32::<BigEndian>(chunk_size_field as u32)?;
+        self.writer.seek(SeekFrom::Start(end_pos))?;
         Ok(())
     }
 

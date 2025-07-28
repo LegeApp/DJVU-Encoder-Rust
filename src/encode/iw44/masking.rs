@@ -150,7 +150,7 @@ pub fn forward_mask(
         }
         // full-band forward transform - use new API
         let levels = ((scale * 2).trailing_zeros() as usize).saturating_sub(1).min(5);
-        Encode::forward::<4>(&mut scratch, w, h, levels);
+        Encode::forward::<4>(&mut scratch, w, h, w, levels);
 
         // zero out masked detail coefficients
         for y in (0..h).step_by(scale * 2) {
@@ -181,7 +181,7 @@ pub fn forward_mask(
         }
 
         // re-decompose to freeze the mask out
-        Encode::forward::<4>(&mut scratch, w, h, levels);
+        Encode::forward::<4>(&mut scratch, w, h, w, levels);
 
         // copy the frozen coefficients back into data
         for y in (0..h).step_by(scale) {
