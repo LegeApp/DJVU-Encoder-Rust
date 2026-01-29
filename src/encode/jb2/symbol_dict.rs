@@ -2,10 +2,10 @@
 //! and provides utilities for their manipulation, such as sorting for optimal
 //! dictionary encoding.
 
-use crate::encode::zc::ZEncoder;
 use crate::encode::jb2::context;
 use crate::encode::jb2::error::Jb2Error;
-use crate::encode::jb2::num_coder::NumCoder;
+use crate::encode::jb2::num_coder::{NumCoder, NumContext};
+use crate::encode::zc::ZEncoder;
 use bitvec::order::Msb0;
 use bitvec::prelude::*;
 use lutz;
@@ -410,25 +410,21 @@ impl SymDictBuilder {
 pub struct SymDictEncoder {
     nc: NumCoder,
     direct_base_context: u32,
-    ctx_sym_count: usize,
-    ctx_sym_width: usize,
-    ctx_sym_height: usize,
+    // NumContext handles for tree-based encoding
+    ctx_sym_count: NumContext,
+    ctx_sym_width: NumContext,
+    ctx_sym_height: NumContext,
 }
 
 impl SymDictEncoder {
     /// Creates a new symbol dictionary encoder.
-    pub fn new(base_context_index: u32, max_contexts: u32, direct_base_context: u32) -> Self {
-        let nc = NumCoder::new(base_context_index as u8, max_contexts as u8);
-        let ctx_sym_count = base_context_index as usize;
-        let ctx_sym_width = base_context_index as usize + 1;
-        let ctx_sym_height = base_context_index as usize + 2;
-
+    pub fn new(_base_context_index: u32, _max_contexts: u32, direct_base_context: u32) -> Self {
         Self {
-            nc,
+            nc: NumCoder::new(),
             direct_base_context,
-            ctx_sym_count,
-            ctx_sym_width,
-            ctx_sym_height,
+            ctx_sym_count: 0,
+            ctx_sym_width: 0,
+            ctx_sym_height: 0,
         }
     }
 
@@ -437,36 +433,32 @@ impl SymDictEncoder {
         &mut self,
         ac: &mut ZEncoder<W>,
         dictionary: &[BitImage],
-        contexts: &mut [u8], // Add global context array parameter
     ) -> Result<(), Jb2Error> {
         // 1. Encode the number of symbols in the dictionary.
-        self.nc.encode_integer(
+        self.nc.code_num(
             ac,
-            contexts,
-            self.ctx_sym_count,
-            dictionary.len() as i32,
+            &mut self.ctx_sym_count,
             0,
             65535,
+            dictionary.len() as i32,
         )?;
 
         // 2. Encode each symbol.
         for symbol in dictionary {
             // Encode width and height.
-            self.nc.encode_integer(
+            self.nc.code_num(
                 ac,
-                contexts,
-                self.ctx_sym_width,
+                &mut self.ctx_sym_width,
+                1,
+                65535,
                 symbol.width as i32,
-                1,
-                65535,
             )?;
-            self.nc.encode_integer(
+            self.nc.code_num(
                 ac,
-                contexts,
-                self.ctx_sym_height,
-                symbol.height as i32,
+                &mut self.ctx_sym_height,
                 1,
                 65535,
+                symbol.height as i32,
             )?;
 
             // Encode the raw bitmap data using the centralized direct coding function.

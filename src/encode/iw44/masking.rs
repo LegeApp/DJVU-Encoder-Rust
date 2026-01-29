@@ -24,7 +24,7 @@ pub fn image_to_mask8(mask_img: &GrayImage, bw: usize, ih: usize) -> Vec<i8> {
 /// from IW44EncodeCodec.cpp. Updated to work with i32 data for consistency
 /// with transform.rs and eliminate unnecessary type conversions.
 pub fn interpolate_mask(
-    data: &mut [i32],
+    data: &mut [i16],
     w: usize,
     h: usize,
     rowsize: usize,
@@ -39,11 +39,11 @@ pub fn interpolate_mask(
             count[y * w + x] = if m != 0 { 0 } else { 0x1000 };
         }
     }
-    // 2) copy original data into a scratch
+    // 2) copy original data into a scratch (convert i16 to i32 for intermediate calculations)
     let mut scratch = vec![0i32; w * h];
     for y in 0..h {
         for x in 0..w {
-            scratch[y * w + x] = data[y * rowsize + x];
+            scratch[y * w + x] = data[y * rowsize + x] as i32;
         }
     }
     // 3) iterate over scales
@@ -98,7 +98,7 @@ pub fn interpolate_mask(
                             for xx in j..jend {
                                 let cidx = yy * w + xx;
                                 if count[cidx] == 0 {
-                                    data[yy * rowsize + xx] = gray;
+                                    data[yy * rowsize + xx] = gray as i16;
                                     count[cidx] = 1;
                                 }
                             }
@@ -121,7 +121,7 @@ pub fn interpolate_mask(
 /// At each scale it zeroes out wavelet coefficients under the mask,
 /// then reconstructs and re-decomposes to freeze those regions.
 pub fn forward_mask(
-    data: &mut [i32],
+    data: &mut [i16],
     w: usize,
     h: usize,
     rowsize: usize,
@@ -142,15 +142,23 @@ pub fn forward_mask(
 
     let mut scale = begin.next_power_of_two();
     while scale < end {
-        // copy every scale-th sample into scratch
+        // copy every scale-th sample into scratch (convert i16 to i32)
         for y in (0..h).step_by(scale) {
             for x in (0..w).step_by(scale) {
-                scratch[y * w + x] = data[y * rowsize + x];
+                scratch[y * w + x] = data[y * rowsize + x] as i32;
             }
         }
         // full-band forward transform - use new API
-        let levels = ((scale * 2).trailing_zeros() as usize).saturating_sub(1).min(5);
-        Encode::forward::<4>(&mut scratch, w, h, w, levels);
+        let levels = ((scale * 2).trailing_zeros() as usize)
+            .saturating_sub(1)
+            .min(5);
+        // Convert scratch to i16 for the transform
+        let mut scratch_i16: Vec<i16> = scratch.iter().map(|&v| v as i16).collect();
+        Encode::forward::<4>(&mut scratch_i16, w, h, w, levels);
+        // Convert back to i32
+        for (s, &v) in scratch.iter_mut().zip(scratch_i16.iter()) {
+            *s = v as i32;
+        }
 
         // zero out masked detail coefficients
         for y in (0..h).step_by(scale * 2) {
@@ -171,22 +179,28 @@ pub fn forward_mask(
         }
 
         // reconstruct back to pixel domain (inverse IW44 transform would be called here in reference impl, but is not implemented in encoder)
-        // restore visible pixels so they remain exact
+        // restore visible pixels so they remain exact (convert i16 to i32)
         for y in (0..h).step_by(scale) {
             for x in (0..w).step_by(scale) {
                 if smask[y * w + x] == 0 {
-                    scratch[y * w + x] = data[y * rowsize + x];
+                    scratch[y * w + x] = data[y * rowsize + x] as i32;
                 }
             }
         }
 
         // re-decompose to freeze the mask out
-        Encode::forward::<4>(&mut scratch, w, h, w, levels);
+        // Convert scratch to i16 for the transform
+        let mut scratch_i16: Vec<i16> = scratch.iter().map(|&v| v as i16).collect();
+        Encode::forward::<4>(&mut scratch_i16, w, h, w, levels);
+        // Convert back to i32
+        for (s, &v) in scratch.iter_mut().zip(scratch_i16.iter()) {
+            *s = v as i32;
+        }
 
-        // copy the frozen coefficients back into data
+        // copy the frozen coefficients back into data (convert i32 to i16)
         for y in (0..h).step_by(scale) {
             for x in (0..w).step_by(scale) {
-                data[y * rowsize + x] = scratch[y * w + x];
+                data[y * rowsize + x] = scratch[y * w + x] as i16;
             }
         }
 

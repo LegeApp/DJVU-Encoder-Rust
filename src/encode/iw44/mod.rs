@@ -10,10 +10,10 @@ pub mod coeff_map;
 pub mod constants;
 pub mod encoder;
 pub mod masking;
-pub mod transform;
-pub mod zigzag;
 #[cfg(test)]
 mod tests;
+pub mod transform;
+pub mod zigzag;
 
 // Re-export commonly used types and functions
 pub use codec::*;

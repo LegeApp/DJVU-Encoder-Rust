@@ -5,11 +5,11 @@ use crate::encode::{
     jb2::encoder::JB2Encoder,
     symbol_dict::BitImage,
 };
-use crate::iff::{iff::IffWriter, bs_byte_stream::bzz_compress};
+use crate::iff::{bs_byte_stream::bzz_compress, iff::IffWriter};
 use crate::{DjvuError, Result};
 use byteorder::{BigEndian, WriteBytesExt};
-use log::debug;
 use image::RgbImage;
+use log::debug;
 use lutz::Image;
 use std::io::{self, Write};
 
@@ -176,7 +176,8 @@ impl PageComponents {
                 let mut dict_builder = crate::encode::jb2::symbol_dict::SymDictBuilder::new(0);
                 let (dictionary, components) = dict_builder.build(fg_img);
                 // --- Djbz ---
-                let dict_raw = jb2_encoder.encode_dictionary_chunk(&dictionary)
+                let dict_raw = jb2_encoder
+                    .encode_dictionary_chunk(&dictionary)
                     .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
                 let dict_bzz = bzz_compress(&dict_raw, 256)
                     .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
@@ -184,7 +185,8 @@ impl PageComponents {
                 writer.write_all(&dict_bzz)?;
                 writer.close_chunk()?;
                 // --- Sjbz ---
-                let sjbz_raw = jb2_encoder.encode_page_chunk(&components)
+                let sjbz_raw = jb2_encoder
+                    .encode_page_chunk(&components)
                     .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
                 let sjbz_bzz = bzz_compress(&sjbz_raw, 256)
                     .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
@@ -197,7 +199,8 @@ impl PageComponents {
                 let mut dict_builder = crate::encode::jb2::symbol_dict::SymDictBuilder::new(0);
                 let (dictionary, components) = dict_builder.build(mask_img);
                 // --- Djbz ---
-                let dict_raw = jb2_encoder.encode_dictionary_chunk(&dictionary)
+                let dict_raw = jb2_encoder
+                    .encode_dictionary_chunk(&dictionary)
                     .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
                 let dict_bzz = bzz_compress(&dict_raw, 256)
                     .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
@@ -205,7 +208,8 @@ impl PageComponents {
                 writer.write_all(&dict_bzz)?;
                 writer.close_chunk()?;
                 // --- Sjbz ---
-                let sjbz_raw = jb2_encoder.encode_page_chunk(&components)
+                let sjbz_raw = jb2_encoder
+                    .encode_page_chunk(&components)
                     .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
                 let sjbz_bzz = bzz_compress(&sjbz_raw, 256)
                     .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
@@ -285,10 +289,18 @@ impl PageComponents {
 
         // Check some sample pixels
         if raw_data.len() >= 9 {
-            debug!("First 3 pixels: RGB({},{},{}) RGB({},{},{}) RGB({},{},{})",
-                   raw_data[0], raw_data[1], raw_data[2],
-                   raw_data[3], raw_data[4], raw_data[5], 
-                   raw_data[6], raw_data[7], raw_data[8]);
+            debug!(
+                "First 3 pixels: RGB({},{},{}) RGB({},{},{}) RGB({},{},{})",
+                raw_data[0],
+                raw_data[1],
+                raw_data[2],
+                raw_data[3],
+                raw_data[4],
+                raw_data[5],
+                raw_data[6],
+                raw_data[7],
+                raw_data[8]
+            );
         }
 
         // Configure IW44 encoder with proper quality-based parameters
@@ -298,9 +310,11 @@ impl PageComponents {
             let quality_ratio = params.bg_quality as f32 / 100.0;
             30.0 + quality_ratio * 70.0 // 30-100 dB range
         });
-        
-        debug!("Configuring IW44 encoder with quality {} -> {:.1} dB",
-               params.bg_quality, target_decibels);
+
+        debug!(
+            "Configuring IW44 encoder with quality {} -> {:.1} dB",
+            params.bg_quality, target_decibels
+        );
 
         let iw44_params = IW44EncoderParams {
             decibels: Some(target_decibels),
@@ -315,10 +329,18 @@ impl PageComponents {
             let mut mask_buf = vec![0u8; (mw * mh) as usize];
             for y in 0..mh {
                 for x in 0..mw {
-                    mask_buf[(y * mw + x) as usize] = if mask_bitimg.get_pixel_unchecked(x as usize, y as usize) { 1 } else { 0 };
+                    mask_buf[(y * mw + x) as usize] =
+                        if mask_bitimg.get_pixel_unchecked(x as usize, y as usize) {
+                            1
+                        } else {
+                            0
+                        };
                 }
             }
-            Some(image::GrayImage::from_raw(mw, mh, mask_buf).expect("Failed to create GrayImage from mask"))
+            Some(
+                image::GrayImage::from_raw(mw, mh, mask_buf)
+                    .expect("Failed to create GrayImage from mask"),
+            )
         } else {
             None
         };
@@ -342,13 +364,13 @@ impl PageComponents {
 
         // Encode and write IW44 data in proper chunks according to DjVu spec
         // Loop until encoder says it's done, like c44.exe does
-        
+
         let mut chunk_count = 0;
         let mut more = true;
-        
+
         while more {
             let (iw44_stream, encoder_more) = encoder
-                .encode_chunk(74) // Use 74 slices per chunk like c44.exe
+                .encode_chunk(usize::MAX) // Encode all remaining slices in one chunk for strict decoder compatibility
                 .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
 
             // An empty stream from the encoder signifies the end of data.
@@ -359,15 +381,24 @@ impl PageComponents {
 
             chunk_count += 1;
             println!(
-                "DEBUG: Writing BG44 chunk {}, 74 slices, {} bytes",
+                "DEBUG: Writing {} chunk {}, {} bytes total",
+                iw_chunk_id,
                 chunk_count,
                 iw44_stream.len()
             );
 
+            // Debug: Check what we're actually writing
+            if iw44_stream.len() > 0 {
+                eprintln!(
+                    "[DEBUG] First 16 bytes of chunk data: {:02x?}",
+                    &iw44_stream[..16.min(iw44_stream.len())]
+                );
+            }
+
             writer.put_chunk(iw_chunk_id)?;
             writer.write_all(&iw44_stream)?;
             writer.close_chunk()?;
-            
+
             more = encoder_more;
         }
 
@@ -388,8 +419,8 @@ impl PageComponents {
         let jb2_raw = jb2_encoder.encode_page(img, 0)?;
 
         // BZZ-compress the JB2 data as required by DjVu spec (§3.2.5)
-        let sjbz_payload = bzz_compress(&jb2_raw, 256)
-            .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
+        let sjbz_payload =
+            bzz_compress(&jb2_raw, 256).map_err(|e| DjvuError::EncodingError(e.to_string()))?;
 
         // Write Sjbz chunk for JB2 bitmap data (shapes and positions)
         // Note: FGbz is for JB2 colors, Sjbz is for the actual bitmap content
@@ -407,8 +438,8 @@ impl PageComponents {
         let jb2_raw = jb2_encoder.encode_page(img, 0)?;
 
         // BZZ-compress the JB2 data as required by DjVu spec
-        let sjbz_payload = bzz_compress(&jb2_raw, 256)
-            .map_err(|e| DjvuError::EncodingError(e.to_string()))?;
+        let sjbz_payload =
+            bzz_compress(&jb2_raw, 256).map_err(|e| DjvuError::EncodingError(e.to_string()))?;
 
         // Write Sjbz chunk
         writer.put_chunk("Sjbz")?;

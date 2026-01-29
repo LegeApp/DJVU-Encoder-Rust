@@ -1,8 +1,8 @@
 // src/jb2/context.rs
 
-use crate::encode::zc::ZEncoder;
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::symbol_dict::BitImage;
+use crate::encode::zc::ZEncoder;
 use std::io::Write;
 
 //-----------------------------------------------------------------------------
@@ -99,7 +99,6 @@ fn _get_refinement_context(
 /// This is used to encode a symbol instance that is a refinement of a symbol
 /// from the dictionary.
 pub fn encode_bitmap_refine<W: Write>(
-
     ac: &mut ZEncoder<W>,
     image: &BitImage,
     reference: &BitImage,
@@ -150,7 +149,6 @@ pub fn encode_bitmap_refine<W: Write>(
 /// This function uses an efficient, row-based approach to minimize redundant
 /// calculations and boundary checks, making it suitable for encoding entire symbols.
 pub fn encode_bitmap_direct<W: Write>(
-
     ac: &mut ZEncoder<W>,
     image: &BitImage,
     base_context_index: usize,
@@ -165,7 +163,6 @@ pub fn encode_bitmap_direct<W: Write>(
             // Get the pixel value and encode it
             let pixel = image.get_pixel_unchecked(x as usize, y as usize);
             ac.encode(pixel, &mut (final_context as u8))?
-
         }
     }
     Ok(())

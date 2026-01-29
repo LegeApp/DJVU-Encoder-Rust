@@ -1,4 +1,6 @@
-use super::table::{DEFAULT_ZP_TABLE, ZpTableEntry};
+use super::table::{ZpTableEntry, DEFAULT_ZP_TABLE};
+use super::ZpEncoderCursor;
+use std::io::Cursor;
 use std::io::Write;
 use thiserror::Error;
 
@@ -29,35 +31,40 @@ impl From<ZCodecError> for std::io::Error {
     }
 }
 
-/// An adaptive quasi-arithmetic encoder implementing the Z-Coder algorithm.
+/// An adaptive quasi-arithmetic encoder implementing the ZP-Coder algorithm.
 pub struct ZEncoder<W: Write> {
     writer: Option<W>,
-    a: u16,      // range register (16-bit)
-    subend: u32, // subrange end (32-bit to match C++ unsigned int)
-    buffer: u32, // 24-bit buffer for zemit
-    nrun: u16,   // run length for zemit
-    byte: u8,
-    scount: u8,
-    delay: u8,   // delay counter for initial bit suppression
+    // Core ZP-Coder registers (matching djvulibre exactly)
+    a: u32,      // range register (unsigned!)
+    subend: u32, // subinterval end
+    buffer: u32, // 3-byte bit buffer (24-bit)
+    nrun: u32,   // run of pending bits
+    byte: u8,    // current output byte
+    scount: i32, // bit counter in current byte
+    delay: i32,  // delay counter
     finished: bool,
     table: [ZpTableEntry; 256], // mutable table for patching
-    debug_count: usize, // Debug counter for limiting debug output
 }
 
 impl<W: Write> ZEncoder<W> {
-    /// Creates a new Z-Coder encoder that writes to the given writer.
-    pub fn new(writer: W, _djvu_compat: bool) -> Result<Self, ZCodecError> {
+    /// Creates a new ZP-Coder encoder that writes to the given writer.
+    pub fn new(writer: W, djvu_compat: bool) -> Result<Self, ZCodecError> {
         // Create a 256-entry table, starting with the default 251 entries
-        let mut table = [ZpTableEntry { p: 0, m: 0, up: 0, dn: 0 }; 256];
-        
+        let mut table = [ZpTableEntry {
+            p: 0,
+            m: 0,
+            up: 0,
+            dn: 0,
+        }; 256];
+
         // Copy the default table entries
         for (i, &entry) in DEFAULT_ZP_TABLE.iter().enumerate() {
             table[i] = entry;
         }
-        
-        // Patch table when _djvu_compat is false
-        if !_djvu_compat {
-            for j in 0..251 {  // Only patch the valid entries
+
+        // Patch table when djvu_compat is false
+        if !djvu_compat {
+            for j in 0..256 {
                 let mut a = 0x10000 - table[j].p as u32;
                 while a >= 0x8000 {
                     a = (a << 1) & 0xffff;
@@ -72,16 +79,15 @@ impl<W: Write> ZEncoder<W> {
 
         Ok(ZEncoder {
             writer: Some(writer),
-            a: 0, // C++ initializes to 0, not 0x8000
-            subend: 0,
-            buffer: 0x000000, // Try starting with empty buffer instead of 0xffffff
-            nrun: 0,
-            byte: 0,
-            scount: 0,
-            delay: 25, // Initial delay as per C++
+            a: 0,             // Initialize to 0 as per DjVuLibre
+            subend: 0,        // Subinterval end starts at 0
+            buffer: 0xffffff, // 3-byte buffer initialized to all 1s
+            nrun: 0,          // Run counter starts at 0
+            byte: 0,          // Current byte starts at 0
+            scount: 0,        // Bit count starts at 0
+            delay: 25,        // Delay starts at 25
             finished: false,
             table,
-            debug_count: 0, // Initialize debug counter
         })
     }
 
@@ -92,160 +98,131 @@ impl<W: Write> ZEncoder<W> {
             return Err(ZCodecError::Finished);
         }
 
-        let ctx_before = *ctx;
-        
-        let z = self.a as u32 + self.table[*ctx as usize].p as u32;
-
-        // Debug output for first few bits
-        if self.debug_count < 10 {
-            eprintln!("RUST DEBUG: bit={}, ctx_before={}, a=0x{:04x}, p={}, z=0x{:04x}, mps={}", 
-                     bit, ctx_before, self.a, self.table[ctx_before as usize].p, z, (ctx_before & 1 != 0));
-            self.debug_count += 1;
-        }
+        // CRITICAL: z = a + p[ctx], not just p[ctx]!
+        let z = self.a + self.table[*ctx as usize].p as u32;
 
         if bit != (*ctx & 1 != 0) {
-            self.encode_lps(ctx, z as u16)?;
+            // LPS path
+            self.encode_lps(ctx, z)?;
         } else if z >= 0x8000 {
-            self.encode_mps(ctx, z as u16)?;
+            // MPS path (only if z >= 0x8000)
+            self.encode_mps(ctx, z)?;
         } else {
-            self.a = z as u16;
+            // Fast path: just update a
+            self.a = z;
         }
+
         Ok(())
     }
 
-    /// Internal MPS encoding logic.
     #[inline(always)]
-    fn encode_mps(&mut self, ctx: &mut u8, z: u16) -> Result<(), ZCodecError> {
-        let old_a = self.a;
-        let mut z_adj = z;
-        
-        // Apply interval adjustment like C++ ZCODER 
-        if z_adj >= 0x8000 {
-            z_adj = 0x4000 + (z_adj >> 1);
+    fn encode_mps(&mut self, ctx: &mut BitContext, mut z: u32) -> Result<(), ZCodecError> {
+        let d = 0x6000 + ((z + self.a) >> 2);
+        if z > d {
+            z = d;
         }
-        
-        // Adaptation
-        if self.a >= self.table[*ctx as usize].m {
+        if self.a >= self.table[*ctx as usize].m as u32 {
             *ctx = self.table[*ctx as usize].up;
         }
-        
-        // Code MPS
-        self.a = z_adj;
-        
-        if self.debug_count < 10 {
-            eprintln!("RUST MPS: old_a=0x{:04x}, new_a=0x{:04x}, m={}, ctx_updated={}", 
-                     old_a, self.a, self.table[*ctx as usize].m, 
-                     old_a >= self.table[*ctx as usize].m);
-        }
-        
-        // Export bits
+        self.a = z;
         if self.a >= 0x8000 {
-            let subend_16 = (self.subend & 0xffff) as u16;
-            self.zemit(1 - (subend_16 >> 15) as u32)?;
-            self.subend = (self.subend << 1) & 0xffff;
-            self.a = (self.a << 1) & 0xffff;
+            self.zemit(1 - ((self.subend >> 15) as i32))?;
+            self.subend = (self.subend << 1) as u16 as u32;
+            self.a = (self.a << 1) as u16 as u32;
         }
         Ok(())
     }
 
-    /// Internal LPS encoding logic.
     #[inline(always)]
-    fn encode_lps(&mut self, ctx: &mut u8, z: u16) -> Result<(), ZCodecError> {
-        let old_a = self.a;
-        let old_subend = self.subend;
-        let mut z_adj = z;
-        
-        // Apply interval adjustment like C++ ZCODER 
-        if z_adj >= 0x8000 {
-            z_adj = 0x4000 + (z_adj >> 1);
+    fn encode_lps(&mut self, ctx: &mut BitContext, mut z: u32) -> Result<(), ZCodecError> {
+        let d = 0x6000 + ((z + self.a) >> 2);
+        if z > d {
+            z = d;
         }
-        
-        // Adaptation
         *ctx = self.table[*ctx as usize].dn;
-        
-        // Code LPS
-        let z_lps = 0x10000u32 - z_adj as u32;
-        self.subend = self.subend + z_lps;
-        self.a = (self.a as u32 + z_lps) as u16;
-        
-        if self.debug_count < 10 {
-            eprintln!("RUST LPS: old_a=0x{:04x}, new_a=0x{:04x}, old_subend=0x{:08x}, new_subend=0x{:08x}, z_adj=0x{:04x}, z_lps=0x{:04x}", 
-                     old_a, self.a, old_subend, self.subend, z_adj, z_lps);
-        }
-        
-        // Export bits
+        z = 0x10000 - z;
+        self.subend = self.subend.wrapping_add(z);
+        self.a = self.a.wrapping_add(z);
         while self.a >= 0x8000 {
-            let subend_16 = (self.subend & 0xffff) as u16;
-            self.zemit(1 - (subend_16 >> 15) as u32)?;
-            self.subend = (self.subend << 1) & 0xffff;
-            self.a = (self.a << 1) & 0xffff;
+            self.zemit(1 - ((self.subend >> 15) as i32))?;
+            self.subend = (self.subend << 1) as u16 as u32;
+            self.a = (self.a << 1) as u16 as u32;
         }
         Ok(())
     }
 
-    /// Emits a bit to the output buffer.
     #[inline(always)]
-    fn zemit(&mut self, b: u32) -> Result<(), ZCodecError> {
-        if self.debug_count < 30 {
-            eprintln!("RUST ZEMIT: b={}, buffer_before=0x{:06x}, nrun={}", b, self.buffer, self.nrun);
+    fn encode_mps_simple(&mut self, z: u32) -> Result<(), ZCodecError> {
+        self.a = z;
+        if self.a >= 0x8000 {
+            self.zemit(1 - ((self.subend >> 15) as i32))?;
+            self.subend = (self.subend << 1) as u16 as u32;
+            self.a = (self.a << 1) as u16 as u32;
         }
-        
-        self.buffer = (self.buffer << 1) | b;
-        let out_byte = (self.buffer >> 24) as u8;
-        self.buffer &= 0xffffff;
+        Ok(())
+    }
 
-        if self.debug_count < 30 {
-            eprintln!("RUST ZEMIT: out_byte=0x{:02x}, buffer_after=0x{:06x}", out_byte, self.buffer);
+    #[inline(always)]
+    fn encode_lps_simple(&mut self, mut z: u32) -> Result<(), ZCodecError> {
+        z = 0x10000 - z;
+        self.subend = self.subend.wrapping_add(z);
+        self.a = self.a.wrapping_add(z);
+        while self.a >= 0x8000 {
+            self.zemit(1 - ((self.subend >> 15) as i32))?;
+            self.subend = (self.subend << 1) as u16 as u32;
+            self.a = (self.a << 1) as u16 as u32;
         }
+        Ok(())
+    }
 
-        match out_byte {
+    #[inline(always)]
+    fn zemit(&mut self, bit: i32) -> Result<(), ZCodecError> {
+        self.buffer = (self.buffer << 1).wrapping_add(bit as u32);
+        let b = (self.buffer >> 24) as u8;
+        self.buffer &= 0x00ff_ffff;
+        match b {
             1 => {
-                if self.debug_count < 30 {
-                    eprintln!("RUST ZEMIT: emit 1, then {} zeros", self.nrun);
-                }
                 self.outbit(1)?;
                 while self.nrun > 0 {
                     self.outbit(0)?;
                     self.nrun -= 1;
                 }
+                self.nrun = 0;
             }
             0xff => {
-                if self.debug_count < 30 {
-                    eprintln!("RUST ZEMIT: emit 0, then {} ones", self.nrun);
-                }
                 self.outbit(0)?;
                 while self.nrun > 0 {
                     self.outbit(1)?;
                     self.nrun -= 1;
                 }
+                self.nrun = 0;
             }
             0 => {
-                if self.debug_count < 30 {
-                    eprintln!("RUST ZEMIT: increment nrun to {}", self.nrun + 1);
-                }
                 self.nrun += 1;
             }
-            _ => unreachable!("zemit logic guarantees out_byte is 0, 1, or 0xff"),
+            _ => {
+                return Err(ZCodecError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid zemit bit",
+                )))
+            }
         }
         Ok(())
     }
 
-    /// Outputs a single bit to the writer with delay logic.
     #[inline(always)]
     fn outbit(&mut self, bit: u8) -> Result<(), ZCodecError> {
         if self.delay > 0 {
             if self.delay < 0xff {
                 self.delay -= 1;
             }
-            return Ok(());
-        }
-
-        if let Some(ref mut writer) = self.writer {
-            self.byte = (self.byte << 1) | bit;
+        } else {
+            self.byte = (self.byte << 1) | (bit & 1);
             self.scount += 1;
-
             if self.scount == 8 {
-                writer.write_all(&[self.byte])?;
+                if let Some(ref mut writer) = self.writer {
+                    writer.write_all(&[self.byte])?;
+                }
                 self.scount = 0;
                 self.byte = 0;
             }
@@ -253,36 +230,146 @@ impl<W: Write> ZEncoder<W> {
         Ok(())
     }
 
-    /// Flushes internal buffers and terminates the stream.
     fn eflush(&mut self) -> Result<(), ZCodecError> {
-        // Adjust subend per C++ rules - exactly match C++ logic
         if self.subend > 0x8000 {
             self.subend = 0x10000;
         } else if self.subend > 0 {
             self.subend = 0x8000;
         }
-
-        // Emit final bits - ensure 16-bit wrap-around like C++
         while self.buffer != 0xffffff || self.subend != 0 {
-            let subend_16 = (self.subend & 0xffff) as u16;
-            self.zemit(1 - (subend_16 >> 15) as u32)?;
-            self.subend = (self.subend << 1) & 0xffff;
+            self.zemit(1 - ((self.subend >> 15) as i32))?;
+            self.subend = (self.subend << 1) as u16 as u32;
         }
-
-        // Emit pending run
         self.outbit(1)?;
         while self.nrun > 0 {
             self.outbit(0)?;
             self.nrun -= 1;
         }
-
-        // Pad with 1s
+        self.nrun = 0;
         while self.scount > 0 {
             self.outbit(1)?;
         }
-
-        // Prevent further emission
         self.delay = 0xff;
+        Ok(())
+    }
+
+    /// MPS encoding logic matching DjVuLibre exactly.
+    #[cfg(any())]
+    #[inline(always)]
+    fn zencoder_mps(&mut self, p: i32) -> Result<(), ZCodecError> {
+        self.a -= p;
+        if self.a <= 0 {
+            if self.a < -p {
+                // MPS_EXCHANGE
+                self.a = p;
+                self.zencoder_lps(p)?;
+            } else {
+                // CONDITIONAL_EXCHANGE
+                self.a = p;
+                self.zencoder_renorm()?;
+            }
+        } else {
+            self.zencoder_renorm()?;
+        }
+        Ok(())
+    }
+
+    /// LPS encoding logic matching DjVuLibre exactly.
+    #[cfg(any())]
+    #[inline(always)]
+    fn zencoder_lps(&mut self, z: i32) -> Result<(), ZCodecError> {
+        self.a -= z;
+        if self.a < 0 {
+            self.a = z;
+            self.zencoder_renorm()?;
+        } else {
+            self.c = self.c.wrapping_add(self.a as u32);
+            self.a = z;
+            self.zencoder_renorm()?;
+        }
+        Ok(())
+    }
+
+    /// Renormalization logic matching DjVuLibre exactly.
+    #[cfg(any())]
+    #[inline(always)]
+    fn zencoder_renorm(&mut self) -> Result<(), ZCodecError> {
+        while self.a < 0x8000 {
+            self.a <<= 1;
+            self.c <<= 1;
+            self.c &= 0xffffffff;
+            self.ct -= 1;
+            if self.ct < 0 {
+                self.encoder_shift()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Encoder shift logic matching DjVuLibre exactly.
+    #[cfg(any())]
+    #[inline(always)]
+    fn encoder_shift(&mut self) -> Result<(), ZCodecError> {
+        let b = ((self.c >> 24) & 0xff) as i32;
+        if b != 0xff {
+            self.encoder_out(b)?;
+        } else if self.fflag {
+            self.encoder_out(b)?;
+        } else if self.scount > 0 {
+            self.buffer += 1;
+            if self.buffer == 0xff {
+                self.encoder_out(0xff)?;
+                self.buffer = 0;
+            }
+            let mut remaining = self.scount;
+            while remaining > 0 {
+                self.encoder_out(self.buffer)?;
+                remaining -= 1;
+            }
+            self.scount = 0;
+            self.encoder_out(b)?
+        } else {
+            self.fflag = true;
+            self.scount = 0;
+            self.buffer = b;
+        }
+        self.ct = 8;
+        Ok(())
+    }
+
+    /// Encoder output logic matching DjVuLibre exactly.
+    #[cfg(any())]
+    #[inline(always)]
+    fn encoder_out(&mut self, b: i32) -> Result<(), ZCodecError> {
+        if let Some(ref mut writer) = self.writer {
+            writer.write_all(&[b as u8])?;
+        }
+        Ok(())
+    }
+
+    /// Encoder flush logic matching DjVuLibre exactly.
+    #[cfg(any())]
+    fn encoder_flush(&mut self) -> Result<(), ZCodecError> {
+        self.zencoder_renorm()?;
+        if self.ct > 0 {
+            self.buffer += 1;
+            if self.buffer == 0xff {
+                self.encoder_out(0xff)?;
+                self.buffer = 0;
+            }
+            let mut remaining = self.scount;
+            while remaining > 0 {
+                self.encoder_out(self.buffer)?;
+                remaining -= 1;
+            }
+            self.scount = 0;
+            self.c = (self.c & 0xffffff) | ((self.buffer as u32) << (self.ct as u32 + 24 - 8));
+            for _ in 0..4 {
+                self.encoder_out(((self.c >> 24) & 0xff) as i32)?;
+                self.c = (self.c << 8) & 0xffffffff;
+            }
+        }
+        self.a = 0;
         Ok(())
     }
 
@@ -295,82 +382,27 @@ impl<W: Write> ZEncoder<W> {
         self.writer.take().ok_or(ZCodecError::Finished)
     }
 
-    // Extended encoding methods
+    // IW44 specific encoding methods
 
-    /// Encodes MPS without adaptation.
-    #[inline(always)]
-    pub fn encode_mps_simple(&mut self, z: u16) -> Result<(), ZCodecError> {
-        self.a = z;
-        if self.a >= 0x8000 {
-            self.zemit(1 - (self.subend >> 15) as u32)?;
-            self.subend = (self.subend << 1) & 0xffff;
-            self.a = (self.a << 1) & 0xffff;
-        }
-        Ok(())
-    }
-
-    /// Encodes LPS without adaptation.
-    #[inline(always)]
-    pub fn encode_lps_simple(&mut self, z: u16) -> Result<(), ZCodecError> {
-        let z_adjusted = 0x10000 - z as u32;
-        self.subend = self.subend + z_adjusted;
-        self.a = (self.a as u32 + z_adjusted) as u16;
-        while self.a >= 0x8000 {
-            self.zemit(1 - (self.subend >> 15) as u32)?;
-            self.subend = (self.subend << 1) & 0xffff;
-            self.a = (self.a << 1) & 0xffff;
-        }
-        Ok(())
-    }
-
-    /// Encodes MPS without learning, with interval reversion.
-    #[inline(always)]
-    pub fn encode_mps_nolearn(&mut self, mut z: u16) -> Result<(), ZCodecError> {
-        if z >= 0x8000 {
-            z = 0x4000 + (z >> 1);
-        }
-        self.a = z;
-        if self.a >= 0x8000 {
-            self.zemit(1 - (self.subend >> 15) as u32)?;
-            self.subend = (self.subend << 1) & 0xffff;
-            self.a = (self.a << 1) & 0xffff;
-        }
-        Ok(())
-    }
-
-    /// Encodes LPS without learning, with interval reversion.
-    #[inline(always)]
-    pub fn encode_lps_nolearn(&mut self, mut z: u16) -> Result<(), ZCodecError> {
-        if z >= 0x8000 {
-            z = 0x4000 + (z >> 1);
-        }
-        let z_adjusted = 0x10000 - z as u32;
-        self.subend = self.subend + z_adjusted;
-        self.a = (self.a as u32 + z_adjusted) as u16;
-        while self.a >= 0x8000 {
-            self.zemit(1 - (self.subend >> 15) as u32)?;
-            self.subend = (self.subend << 1) & 0xffff;
-            self.a = (self.a << 1) & 0xffff;
-        }
-        Ok(())
-    }
-
-    /// IWencoder for IW44 compatibility.
+    /// IWencoder for IW44 compatibility - uses fixed-probability (non-adaptive) coding.
     #[inline(always)]
     pub fn IWencoder(&mut self, bit: bool) -> Result<(), ZCodecError> {
-        let z = 0x8000 + ((self.a as u32 * 3) >> 3) as u16;
+        let z = 0x8000u32 + ((self.a + self.a + self.a) >> 3);
         if bit {
-            self.encode_lps_simple(z)?;
+            self.encode_lps_simple(z)
         } else {
-            self.encode_mps_simple(z)?;
+            self.encode_mps_simple(z)
         }
-        Ok(())
     }
 
     /// Encodes a bit with context-based routing (adaptive vs fixed-probability).
     /// Raw contexts (128, 129) use IWencoder, others use normal adaptive encoding.
     #[inline(always)]
-    pub fn encode_with_context_routing(&mut self, bit: bool, ctx: &mut BitContext) -> Result<(), ZCodecError> {
+    pub fn encode_with_context_routing(
+        &mut self,
+        bit: bool,
+        ctx: &mut BitContext,
+    ) -> Result<(), ZCodecError> {
         match *ctx {
             RAW_CONTEXT_128 | RAW_CONTEXT_129 => {
                 // Fixed-probability path – no context update
@@ -388,7 +420,7 @@ impl<W: Write> Drop for ZEncoder<W> {
     fn drop(&mut self) {
         if !self.finished {
             if let Err(e) = self.eflush() {
-                panic!("ZEncoder failed to flush on drop: {}", e);
+                eprintln!("Warning: ZEncoder failed to flush on drop: {}", e);
             }
         }
     }
@@ -401,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_encode_simple_sequence() {
-        let mut encoder = ZEncoder::new(Cursor::new(Vec::new()), true).unwrap();
+        let mut encoder = ZEncoder::new(Cursor::new(Vec::new()), false).unwrap();
         let mut ctx = 0;
 
         for i in 0..100 {
@@ -417,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_encode_highly_probable_sequence() {
-        let mut encoder = ZEncoder::new(Cursor::new(Vec::new()), true).unwrap();
+        let mut encoder = ZEncoder::new(Cursor::new(Vec::new()), false).unwrap();
         let mut ctx = 0;
 
         for _ in 0..1000 {
@@ -427,5 +459,28 @@ mod tests {
 
         let data = encoder.finish().unwrap().into_inner();
         assert!(data.len() < 20);
+    }
+}
+
+// Implement ZpEncoderCursor trait for ZEncoder<Cursor<Vec<u8>>>
+impl ZpEncoderCursor for ZEncoder<Cursor<Vec<u8>>> {
+    fn encode(&mut self, bit: bool, ctx: &mut BitContext) -> Result<(), ZCodecError> {
+        self.encode(bit, ctx)
+    }
+
+    fn IWencoder(&mut self, bit: bool) -> Result<(), ZCodecError> {
+        self.IWencoder(bit)
+    }
+
+    fn tell_bytes(&self) -> usize {
+        if let Some(ref writer) = self.writer {
+            writer.get_ref().len()
+        } else {
+            0
+        }
+    }
+
+    fn finish(self) -> Result<Cursor<Vec<u8>>, ZCodecError> {
+        self.finish()
     }
 }

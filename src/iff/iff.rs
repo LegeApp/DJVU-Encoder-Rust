@@ -185,7 +185,8 @@ impl<'a> IffWriter<'a> {
             self.writer.stream_position()?
         };
 
-        self.chunk_stack.push((size_pos, payload_start_pos, is_composite));
+        self.chunk_stack
+            .push((size_pos, payload_start_pos, is_composite));
 
         Ok(())
     }
@@ -195,20 +196,22 @@ impl<'a> IffWriter<'a> {
     /// For composite chunks, the size includes the 4-byte secondary id
     /// to match the DjVu specification and standard IFF format.
     pub fn close_chunk(&mut self) -> Result<()> {
-        let (size_pos, payload_start_pos, is_composite) = self.chunk_stack.pop()
+        let (size_pos, payload_start_pos, is_composite) = self
+            .chunk_stack
+            .pop()
             .ok_or_else(|| DjvuError::InvalidOperation("close_chunk: no open chunk".into()))?;
 
         let mut end_pos = self.writer.stream_position()?;
-        
+
         // Calculate the size field value
         // For composite chunks: include the secondary ID (full payload from after size field)
         // For simple chunks: exclude nothing (payload from after size field)
         let size_calculation_start = if is_composite {
-            size_pos + 4  // Start counting from after the size field (includes secondary ID)
+            size_pos + 4 // Start counting from after the size field (includes secondary ID)
         } else {
-            payload_start_pos  // Start counting from after the size field (no secondary ID)
+            payload_start_pos // Start counting from after the size field (no secondary ID)
         };
-        
+
         let chunk_size_field = end_pos - size_calculation_start;
 
         // IFF: pad to even overall size, but byte is **not** counted
@@ -219,7 +222,8 @@ impl<'a> IffWriter<'a> {
 
         // Patch the size field and restore position
         self.writer.seek(SeekFrom::Start(size_pos))?;
-        self.writer.write_u32::<BigEndian>(chunk_size_field as u32)?;
+        self.writer
+            .write_u32::<BigEndian>(chunk_size_field as u32)?;
         self.writer.seek(SeekFrom::Start(end_pos))?;
         Ok(())
     }

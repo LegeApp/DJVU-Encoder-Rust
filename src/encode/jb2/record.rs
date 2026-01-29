@@ -3,12 +3,12 @@
 //! This module is responsible for encoding the sequence of symbol instances
 //! that make up the content of a page.
 
-use crate::encode::zc::ZEncoder;
 use crate::encode::jb2::context;
 use crate::encode::jb2::error::Jb2Error;
-use crate::encode::jb2::num_coder::NumCoder;
-use crate::encode::jb2::relative::{self, RelLocPredictor};
+use crate::encode::jb2::num_coder::{NumCoder, NumContext, BIG_NEGATIVE, BIG_POSITIVE};
+use crate::encode::jb2::relative::RelLocPredictor;
 use crate::encode::jb2::symbol_dict::{BitImage, ConnectedComponent};
+use crate::encode::zc::ZEncoder;
 use std::io::Write;
 
 /// JB2 record types.
@@ -25,37 +25,26 @@ pub struct RecordStreamEncoder {
     nc: NumCoder,
     rlp: RelLocPredictor,
     refinement_base_context: u32,
-    // Context handles for specific operations
-    ctx_sym_id: usize,
-    ctx_rel_loc: usize,
-    ctx_rec_type: usize,
+    // NumContext handles for tree-based encoding
+    ctx_sym_id: NumContext,
+    ctx_rel_loc_x: NumContext,
+    ctx_rel_loc_y: NumContext,
+    ctx_rec_type: NumContext,
 }
 
 impl RecordStreamEncoder {
     /// Creates a new record stream encoder.
     /// It requires a base context index to ensure its contexts don't overlap
     /// with other components.
-    pub fn new(base_context_index: u32, max_contexts: u32, refinement_base_context: u32) -> Self {
-        // Partition the available contexts between the relative location predictor
-        // and the general-purpose number coder.
-        let rlp_contexts = relative::NUM_CONTEXTS;
-        let nc_contexts = max_contexts - rlp_contexts;
-        let nc_base_index = base_context_index + rlp_contexts;
-
-        let nc = NumCoder::new(nc_base_index.try_into().unwrap(), nc_contexts.try_into().unwrap());
-
-        // Allocate context indices (not handles)
-        let ctx_rec_type = nc_base_index as usize;
-        let ctx_sym_id = nc_base_index as usize + 1;
-        let ctx_rel_loc = nc_base_index as usize + 2;
-
+    pub fn new(base_context_index: u32, _max_contexts: u32, refinement_base_context: u32) -> Self {
         Self {
-            nc,
+            nc: NumCoder::new(),
             rlp: RelLocPredictor::new(base_context_index),
             refinement_base_context,
-            ctx_rec_type,
-            ctx_sym_id,
-            ctx_rel_loc,
+            ctx_sym_id: 0,
+            ctx_rel_loc_x: 0,
+            ctx_rel_loc_y: 0,
+            ctx_rec_type: 0,
         }
     }
 
@@ -66,7 +55,6 @@ impl RecordStreamEncoder {
         component: &ConnectedComponent,
         dictionary: &[BitImage],
         is_refinement: bool,
-        contexts: &mut [u8], // Add global context array parameter
     ) -> Result<(), Jb2Error> {
         let rec_type = if is_refinement {
             RecordType::SymbolRefinement
@@ -75,17 +63,16 @@ impl RecordStreamEncoder {
         };
 
         // 1. Encode the record type.
-        self.code_rec_type(ac, rec_type, contexts)?;
+        self.code_rec_type(ac, rec_type)?;
 
         // 2. Encode the symbol ID.
         let sym_id = component.dict_symbol_index.unwrap_or(0);
-        self.nc.encode_integer(
+        self.nc.code_num(
             ac,
-            contexts,
-            self.ctx_sym_id,
-            sym_id as i32,
+            &mut self.ctx_sym_id,
             0,
             dictionary.len() as i32 - 1,
+            sym_id as i32,
         )?;
 
         // 3. Encode the location (and get the relative offset for refinement).
@@ -102,8 +89,8 @@ impl RecordStreamEncoder {
         let dy = component.bounds.y as i32 - pred_dy;
 
         // Encode the relative location using reasonable bounds
-        self.nc.encode_integer(ac, contexts, self.ctx_rel_loc, dx, -32768, 32767)?;
-        self.nc.encode_integer(ac, contexts, self.ctx_rel_loc + 1, dy, -32768, 32767)?;
+        self.nc.code_num(ac, &mut self.ctx_rel_loc_x, BIG_NEGATIVE, BIG_POSITIVE, dx)?;
+        self.nc.code_num(ac, &mut self.ctx_rel_loc_y, BIG_NEGATIVE, BIG_POSITIVE, dy)?;
 
         // 4. If it's a refinement, encode the actual bitmap differences.
         if is_refinement {
@@ -126,16 +113,8 @@ impl RecordStreamEncoder {
         &mut self,
         ac: &mut ZEncoder<W>,
         rec_type: RecordType,
-        contexts: &mut [u8],
     ) -> Result<(), Jb2Error> {
         // Encode record type as integer (1 for SymbolInstance, 2 for SymbolRefinement)
-        self.nc.encode_integer(
-            ac,
-            contexts,
-            self.ctx_rec_type,
-            rec_type as i32,
-            1,
-            2,
-        )
+        self.nc.code_num(ac, &mut self.ctx_rec_type, 1, 2, rec_type as i32)
     }
 }

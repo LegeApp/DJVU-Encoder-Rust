@@ -33,4 +33,7 @@ pub enum Jb2Error {
 
     #[error("Invalid bitmap dimensions or malformed data")]
     InvalidBitmap,
+
+    #[error("Invalid encoder state: {0}")]
+    InvalidState(String),
 }

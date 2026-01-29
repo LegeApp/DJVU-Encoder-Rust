@@ -27,7 +27,7 @@ impl RgbColor {
     pub fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b }
     }
-    
+
     pub fn distance(&self, other: &RgbColor) -> u32 {
         let dr = (self.r as i32 - other.r as i32).abs() as u32;
         let dg = (self.g as i32 - other.g as i32).abs() as u32;
@@ -70,7 +70,7 @@ impl ColorAnalysis {
                 percentage,
             };
         }
-        
+
         // Look for colors within tolerance
         let mut close_colors = Vec::new();
         for (color, &count) in &self.color_counts {
@@ -80,7 +80,7 @@ impl ColorAnalysis {
                 close_colors.push((color.clone(), count, percentage, distance));
             }
         }
-        
+
         if !close_colors.is_empty() {
             // Sort by distance (closest first)
             close_colors.sort_by_key(|(_, _, _, distance)| *distance);
@@ -89,19 +89,21 @@ impl ColorAnalysis {
                 closest: close_colors,
             };
         }
-        
+
         // Find the 3 closest colors for diagnosis
-        let mut all_colors: Vec<_> = self.color_counts.iter()
+        let mut all_colors: Vec<_> = self
+            .color_counts
+            .iter()
             .map(|(color, &count)| {
                 let distance = expected.distance(color);
                 let percentage = (count as f64 / self.total_pixels as f64) * 100.0;
                 (color.clone(), count, percentage, distance)
             })
             .collect();
-        
+
         all_colors.sort_by_key(|(_, _, _, distance)| *distance);
         all_colors.truncate(3);
-        
+
         ColorCheckResult::NoMatch {
             expected: expected.clone(),
             closest: all_colors,
@@ -132,31 +134,46 @@ impl ColorCheckResult {
             ColorCheckResult::ExactMatch { percentage, .. } => *percentage >= min_percentage,
             ColorCheckResult::CloseMatch { closest, .. } => {
                 closest.iter().map(|(_, _, pct, _)| *pct).sum::<f64>() >= min_percentage
-            },
+            }
             ColorCheckResult::NoMatch { .. } => false,
         }
     }
-    
+
     pub fn print_result(&self) {
         match self {
-            ColorCheckResult::ExactMatch { color, count, percentage } => {
-                println!("✅ Exact match found: {} - {} pixels ({:.1}%)", color, count, percentage);
-            },
+            ColorCheckResult::ExactMatch {
+                color,
+                count,
+                percentage,
+            } => {
+                println!(
+                    "✅ Exact match found: {} - {} pixels ({:.1}%)",
+                    color, count, percentage
+                );
+            }
             ColorCheckResult::CloseMatch { expected, closest } => {
-                println!("🟡 Close match for {}: {} similar colors found", expected, closest.len());
+                println!(
+                    "🟡 Close match for {}: {} similar colors found",
+                    expected,
+                    closest.len()
+                );
                 for (color, count, percentage, distance) in closest {
-                    println!("   {} - {} pixels ({:.1}%) - distance: {}", 
-                           color, count, percentage, distance);
+                    println!(
+                        "   {} - {} pixels ({:.1}%) - distance: {}",
+                        color, count, percentage, distance
+                    );
                 }
-            },
+            }
             ColorCheckResult::NoMatch { expected, closest } => {
                 println!("❌ No match for {}", expected);
                 println!("   Closest colors:");
                 for (color, count, percentage, distance) in closest {
-                    println!("   {} - {} pixels ({:.1}%) - distance: {}", 
-                           color, count, percentage, distance);
+                    println!(
+                        "   {} - {} pixels ({:.1}%) - distance: {}",
+                        color, count, percentage, distance
+                    );
                 }
-            },
+            }
         }
     }
 }
@@ -164,17 +181,18 @@ impl ColorCheckResult {
 pub fn read_ppm<P: AsRef<Path>>(filename: P) -> Result<PpmData, ColorCheckerError> {
     let file = File::open(filename)?;
     let mut reader = BufReader::new(file);
-    
+
     // Read magic number
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let magic = line.trim();
     if magic != "P6" {
-        return Err(ColorCheckerError::InvalidFormat(
-            format!("Expected P6, got {}", magic)
-        ));
+        return Err(ColorCheckerError::InvalidFormat(format!(
+            "Expected P6, got {}",
+            magic
+        )));
     }
-    
+
     // Skip comments and read dimensions
     line.clear();
     reader.read_line(&mut line)?;
@@ -182,30 +200,35 @@ pub fn read_ppm<P: AsRef<Path>>(filename: P) -> Result<PpmData, ColorCheckerErro
         line.clear();
         reader.read_line(&mut line)?;
     }
-    
+
     let dimensions: Vec<&str> = line.trim().split_whitespace().collect();
     if dimensions.len() != 2 {
-        return Err(ColorCheckerError::Parse(
-            format!("Invalid dimensions line: {}", line)
-        ));
+        return Err(ColorCheckerError::Parse(format!(
+            "Invalid dimensions line: {}",
+            line
+        )));
     }
-    
-    let width: u32 = dimensions[0].parse()
+
+    let width: u32 = dimensions[0]
+        .parse()
         .map_err(|_| ColorCheckerError::Parse(format!("Invalid width: {}", dimensions[0])))?;
-    let height: u32 = dimensions[1].parse()
+    let height: u32 = dimensions[1]
+        .parse()
         .map_err(|_| ColorCheckerError::Parse(format!("Invalid height: {}", dimensions[1])))?;
-    
+
     // Read max value
     line.clear();
     reader.read_line(&mut line)?;
-    let max_val: u32 = line.trim().parse()
+    let max_val: u32 = line
+        .trim()
+        .parse()
         .map_err(|_| ColorCheckerError::Parse(format!("Invalid max value: {}", line)))?;
-    
+
     // Read pixel data
     let expected_bytes = (width * height * 3) as usize;
     let mut pixels = vec![0u8; expected_bytes];
     reader.read_exact(&mut pixels)?;
-    
+
     Ok(PpmData {
         width,
         height,
@@ -217,27 +240,28 @@ pub fn read_ppm<P: AsRef<Path>>(filename: P) -> Result<PpmData, ColorCheckerErro
 pub fn analyze_colors(ppm_data: &PpmData) -> ColorAnalysis {
     let mut color_counts = HashMap::new();
     let mut sample_pixels = Vec::new();
-    
+
     let total_pixels = ppm_data.width * ppm_data.height;
-    
+
     // Process pixels in chunks of 3 (RGB)
     for chunk in ppm_data.pixels.chunks_exact(3) {
         let color = RgbColor::new(chunk[0], chunk[1], chunk[2]);
         *color_counts.entry(color.clone()).or_insert(0) += 1;
-        
+
         // Collect first 10 pixels as samples
         if sample_pixels.len() < 10 {
             sample_pixels.push(color);
         }
     }
-    
+
     let unique_colors = color_counts.len() as u32;
-    
+
     // Find most common color
-    let most_common_color = color_counts.iter()
+    let most_common_color = color_counts
+        .iter()
         .max_by_key(|(_, &count)| count)
         .map(|(color, &count)| (color.clone(), count));
-    
+
     ColorAnalysis {
         total_pixels,
         unique_colors,
@@ -248,39 +272,39 @@ pub fn analyze_colors(ppm_data: &PpmData) -> ColorAnalysis {
 }
 
 pub fn check_solid_color<P: AsRef<Path>>(
-    ppm_path: P, 
+    ppm_path: P,
     expected_color: RgbColor,
     tolerance: u32,
-    min_percentage: f64
+    min_percentage: f64,
 ) -> Result<bool, ColorCheckerError> {
     let ppm_data = read_ppm(ppm_path)?;
     let analysis = analyze_colors(&ppm_data);
-    
+
     println!("Image dimensions: {}x{}", ppm_data.width, ppm_data.height);
     println!("Total pixels: {}", analysis.total_pixels);
     println!("Unique colors: {}", analysis.unique_colors);
-    
+
     let result = analysis.check_expected_color(&expected_color, tolerance);
     result.print_result();
-    
+
     Ok(result.is_acceptable(min_percentage))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_rgb_color_distance() {
         let red = RgbColor::new(255, 0, 0);
         let blue = RgbColor::new(0, 0, 255);
         let light_red = RgbColor::new(250, 5, 5);
-        
+
         assert_eq!(red.distance(&red), 0);
         assert_eq!(red.distance(&light_red), 15); // |255-250| + |0-5| + |0-5| = 15
         assert!(red.distance(&blue) > red.distance(&light_red));
     }
-    
+
     #[test]
     fn test_color_check_result() {
         let result = ColorCheckResult::ExactMatch {
@@ -288,7 +312,7 @@ mod tests {
             count: 100,
             percentage: 95.0,
         };
-        
+
         assert!(result.is_acceptable(90.0));
         assert!(!result.is_acceptable(99.0));
     }

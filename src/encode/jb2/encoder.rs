@@ -4,12 +4,12 @@
 //! dictionary encoder, record stream encoder) together to provide a simple
 //! public API for encoding a full JB2 page.
 
-use crate::encode::zc::ZEncoder;
 use crate::encode::jb2::error::Jb2Error;
 use crate::encode::jb2::record::RecordStreamEncoder;
 use crate::encode::jb2::symbol_dict::{
     BitImage, ConnectedComponent, SymDictBuilder, SymDictEncoder,
 };
+use crate::encode::zc::ZEncoder;
 use std::io::{Cursor, Write};
 
 // Context partitioning for the JB2 encoder.
@@ -18,9 +18,9 @@ use std::io::{Cursor, Write};
 
 // 1. Contexts for direct bitmap coding (allocate a reasonable subset).
 const DIRECT_BITMAP_CONTEXTS: u32 = 64; // Much smaller allocation
-// 2. Contexts for refinement bitmap coding (allocate a reasonable subset).
+                                        // 2. Contexts for refinement bitmap coding (allocate a reasonable subset).
 const REFINEMENT_BITMAP_CONTEXTS: u32 = 96; // Much smaller allocation
-// 3. Contexts for the symbol dictionary's number coder.
+                                            // 3. Contexts for the symbol dictionary's number coder.
 const SYM_DICT_NC_CONTEXTS: u32 = 64;
 // 4. Contexts for the record stream's number coder.
 const RECORD_STREAM_NC_CONTEXTS: u32 = 32;
@@ -78,18 +78,18 @@ impl<W: Write> JB2Encoder<W> {
     }
 
     /// Encodes and writes the JB2DS (dictionary) chunk.
-    pub fn encode_dictionary_chunk(&mut self, dictionary: &[BitImage]) -> Result<Vec<u8>, Jb2Error> {
+    pub fn encode_dictionary_chunk(
+        &mut self,
+        dictionary: &[BitImage],
+    ) -> Result<Vec<u8>, Jb2Error> {
         // Store the dictionary for later use in page encoding.
         self.dictionary = dictionary.to_vec();
 
         let chunk_data = {
             let mut buffer = Cursor::new(Vec::new());
             {
-                let mut ac = ZEncoder::new(&mut buffer, true)?;
-                // Create context array for the arithmetic coder
-                let mut contexts = vec![0u8; TOTAL_CONTEXTS as usize];
-                self.sym_dict_encoder.encode(&mut ac, dictionary, &mut contexts)?;
-
+                let mut ac = ZEncoder::new(&mut buffer, false)?;
+                self.sym_dict_encoder.encode(&mut ac, dictionary)?;
             }
             buffer.into_inner()
         };
@@ -107,15 +107,12 @@ impl<W: Write> JB2Encoder<W> {
         let chunk_data = {
             let mut buffer = Cursor::new(Vec::new());
             {
-                let mut ac = ZEncoder::new(&mut buffer, true)?;
+                let mut ac = ZEncoder::new(&mut buffer, false)?;
                 let mut record_encoder = RecordStreamEncoder::new(
                     RECORD_STREAM_NC_BASE,
                     RECORD_STREAM_NC_CONTEXTS,
                     REFINEMENT_BITMAP_BASE,
                 );
-
-                // Create context array for the arithmetic coder
-                let mut contexts = vec![0u8; TOTAL_CONTEXTS as usize];
 
                 for component in components {
                     let sym_id = component.dict_symbol_index.unwrap_or(0);
@@ -130,11 +127,8 @@ impl<W: Write> JB2Encoder<W> {
                         component,
                         &self.dictionary,
                         is_refinement,
-                        &mut contexts,
                     )?;
                 }
-
-
             }
             buffer.into_inner()
         };

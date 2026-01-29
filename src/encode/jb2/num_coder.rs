@@ -1,151 +1,350 @@
-//! DjVu-spec-compatible integer coder using the 4-phase multivalue extension.
+//! DjVu-compatible integer coder using tree-based NumContext.
+//!
+//! This implements the exact algorithm from DjVuLibre's JB2Image.cpp CodeNum function.
+//! The algorithm uses a binary tree where each node contains a bit context, and
+//! left/right child pointers to navigate based on encoding decisions.
 
-use crate::encode::zc::ZEncoder;
 use crate::encode::jb2::error::Jb2Error;
+use crate::encode::zc::ZEncoder;
 use std::io::Write;
 
-/// Bounds for signed integer coding.
+/// Bounds for signed integer coding (from DjVuLibre).
 pub const BIG_POSITIVE: i32 = 262_142;
 pub const BIG_NEGATIVE: i32 = -262_143;
 
-/// Number of contexts used for phase 2 range decisions (per DjVu spec)
-const PHASE2_CONTEXTS: usize = 18;
+/// Chunk size for cell allocation (matches DjVuLibre CELLCHUNK).
+const CELLCHUNK: usize = 20000;
 
-/// DjVu-spec-compatible integer encoder using the 4-phase multivalue extension.
-/// This follows the exact algorithm described in the DjVu v3 specification.
+/// A NumContext is an index into the tree structure.
+pub type NumContext = u32;
+
+/// Tree-based number coder matching DjVuLibre's exact algorithm.
+///
+/// This maintains a binary tree where:
+/// - `bitcells[ctx]` is the bit context for node `ctx`
+/// - `leftcell[ctx]` is the left child (decision = false)
+/// - `rightcell[ctx]` is the right child (decision = true)
 pub struct NumCoder {
-    base_context: u8,
-    max_contexts: u8,
-    next_context: u8,
+    /// Bit contexts for each tree node
+    pub bitcells: Vec<u8>,
+    /// Left child pointers (decision = false)
+    pub leftcell: Vec<NumContext>,
+    /// Right child pointers (decision = true)
+    pub rightcell: Vec<NumContext>,
+    /// Next cell to allocate
+    pub cur_ncell: NumContext,
+}
+
+impl Default for NumCoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NumCoder {
-    /// Creates a new NumCoder that will use a specific range of contexts.
-    pub fn new(base_context_index: u8, max_contexts: u8) -> Self {
-        Self {
-            base_context: base_context_index,
-            max_contexts,
-            next_context: base_context_index,
-        }
+    /// Creates a new NumCoder with initial capacity.
+    pub fn new() -> Self {
+        let mut coder = Self {
+            bitcells: vec![0; CELLCHUNK],
+            leftcell: vec![0; CELLCHUNK],
+            rightcell: vec![0; CELLCHUNK],
+            cur_ncell: 1, // Cell 0 is a dummy cell
+        };
+        // Initialize cell 0 as dummy
+        coder.bitcells[0] = 0;
+        coder.leftcell[0] = 0;
+        coder.rightcell[0] = 0;
+        coder
     }
 
-    /// Allocates a new context and returns its handle
-    pub fn alloc_context(&mut self) -> u8 {
-        if self.next_context >= self.base_context + self.max_contexts {
-            // Reuse contexts if we run out (simple round-robin)
-            self.next_context = self.base_context;
+    /// Resets all numerical contexts (called after REQUIRED_DICT_OR_RESET record).
+    pub fn reset(&mut self) {
+        // Clear all cells and reset counter
+        for i in 0..self.bitcells.len() {
+            self.bitcells[i] = 0;
+            self.leftcell[i] = 0;
+            self.rightcell[i] = 0;
         }
-        let ctx = self.next_context;
-        self.next_context += 1;
-        ctx
+        self.cur_ncell = 1;
     }
 
-    /// Encodes an integer using the DjVu 4-phase multivalue extension algorithm.
-    /// This follows the exact specification from the DjVu v3 spec.
-    pub fn encode_integer<W: Write>(
-        &self,
+    /// Returns true if we need to send a reset (too many cells allocated).
+    pub fn needs_reset(&self) -> bool {
+        self.cur_ncell as usize > CELLCHUNK
+    }
+
+    /// Encodes an integer using the DjVuLibre tree-based algorithm.
+    ///
+    /// This implements the exact algorithm from JB2Image.cpp CodeNum():
+    /// - Phase 1: Sign encoding
+    /// - Phase 2: Exponential range search (cutoff doubles)
+    /// - Phase 3: Binary search to find exact value
+    ///
+    /// The `ctx` parameter is the root context for this number type (e.g., dist_record_type).
+    /// It will be updated as the tree grows.
+    pub fn code_num<W: Write>(
+        &mut self,
         zc: &mut ZEncoder<W>,
-        contexts: &mut [u8],
-        base_context: usize,
-        value: i32,
-        low: i32,
-        high: i32,
+        ctx: &mut NumContext,
+        mut low: i32,
+        mut high: i32,
+        mut v: i32,
     ) -> Result<(), Jb2Error> {
-        if value < low || value > high {
+        if v < low || v > high {
             return Err(Jb2Error::InvalidNumber(format!(
-                "Value {} outside range [{}, {}]", value, low, high
+                "Value {} outside range [{}, {}]",
+                v, low, high
             )));
         }
 
-        if low == high {
-            // No encoding needed if range is single value
-            return Ok(());
+        let mut negative = false;
+        let mut cutoff: i32 = 0;
+        let mut phase = 1;
+        let mut range: u32 = 0xffffffff;
+
+        // We track the current position using an enum to handle the pointer-to-pointer semantics
+        // In DjVuLibre: pctx points to either the root ctx, or to leftcell[x] or rightcell[x]
+        enum CtxRef {
+            Root,
+            Left(usize),  // leftcell[idx]
+            Right(usize), // rightcell[idx]
         }
 
-        // Phase 1: Sign bit (if range includes both positive and negative)
-        let v = if low < 0 && high >= 0 {
-            let negative = value < 0;
-            zc.encode(negative, &mut contexts[base_context])?;
-            
-            if negative {
-                (-value - 1) as u32
-            } else {
-                value as u32
-            }
-        } else if low >= 0 {
-            value as u32
-        } else {
-            (-value - 1) as u32
-        };
+        let mut ctx_ref = CtxRef::Root;
 
-        // Phase 2: Range determination using the DjVu-spec ranges
-        let ranges = [
-            (0, 0),       // Range 0: 0
-            (1, 2),       // Range 1: 1-2  
-            (3, 6),       // Range 2: 3-6
-            (7, 14),      // Range 3: 7-14
-            (15, 30),     // Range 4: 15-30
-            (31, 62),     // Range 5: 31-62
-            (63, 126),    // Range 6: 63-126
-            (127, 254),   // Range 7: 127-254
-            (255, 510),   // Range 8: 255-510
-            (511, 1022),  // Range 9: 511-1022
-            (1023, 2046), // Range 10: 1023-2046
-            (2047, 4094), // Range 11: 2047-4094
-            (4095, 8190), // Range 12: 4095-8190
-            (8191, 16382), // Range 13: 8191-16382
-            (16383, 32766), // Range 14: 16383-32766
-            (32767, 65534), // Range 15: 32767-65534
-            (65535, 131070), // Range 16: 65535-131070
-            (131071, 262142), // Range 17: 131071-262142
-        ];
+        // Navigate through the tree
+        while range != 1 {
+            // Get the current context value
+            let current_ctx = match ctx_ref {
+                CtxRef::Root => *ctx,
+                CtxRef::Left(idx) => self.leftcell[idx],
+                CtxRef::Right(idx) => self.rightcell[idx],
+            };
 
-        let mut range_index = None;
-        for (i, &(start, end)) in ranges.iter().enumerate() {
-            if v >= start && v <= end {
-                range_index = Some(i);
-                break;
-            }
-        }
-
-        let range_index = range_index.ok_or_else(|| {
-            Jb2Error::InvalidNumber(format!("Value {} outside all ranges", v))
-        })?;
-
-        // Encode range decisions (use exactly 18 contexts for phase 2)
-        for i in 0..range_index {
-            if base_context + 1 + i >= contexts.len() {
-                return Err(Jb2Error::ContextOverflow);
-            }
-            zc.encode(false, &mut contexts[base_context + 1 + i])?; // Not in this range
-        }
-        if range_index < ranges.len() && base_context + 1 + range_index < contexts.len() {
-            zc.encode(true, &mut contexts[base_context + 1 + range_index])?; // In this range
-        }
-
-        // Phase 3: Exact value within range (LSB-first per DjVu spec)
-        let (range_start, range_end) = ranges[range_index];
-        if range_start != range_end {
-            let offset = v - range_start;
-            let range_size = range_end - range_start + 1;
-            
-            // Encode bits of offset, LSB first (least significant bit first)
-            let bits_needed = (range_size as f64).log2().ceil() as u32;
-            let phase3_context_base = base_context + 1 + PHASE2_CONTEXTS;
-            
-            for bit_pos in 0..bits_needed {
-                if phase3_context_base + bit_pos as usize >= contexts.len() {
-                    return Err(Jb2Error::ContextOverflow);
+            // Ensure we have a valid cell, allocating if necessary
+            let current_ctx = if current_ctx == 0 {
+                // Grow arrays if needed
+                if self.cur_ncell as usize >= self.bitcells.len() {
+                    let new_size = self.bitcells.len() + CELLCHUNK;
+                    self.bitcells.resize(new_size, 0);
+                    self.leftcell.resize(new_size, 0);
+                    self.rightcell.resize(new_size, 0);
                 }
-                let bit = (offset >> bit_pos) & 1;
-                zc.encode(bit != 0, &mut contexts[phase3_context_base + bit_pos as usize])?;
+                let new_cell = self.cur_ncell;
+                self.cur_ncell += 1;
+                self.bitcells[new_cell as usize] = 0;
+                self.leftcell[new_cell as usize] = 0;
+                self.rightcell[new_cell as usize] = 0;
+
+                // Update the pointer
+                match ctx_ref {
+                    CtxRef::Root => *ctx = new_cell,
+                    CtxRef::Left(idx) => self.leftcell[idx] = new_cell,
+                    CtxRef::Right(idx) => self.rightcell[idx] = new_cell,
+                }
+                new_cell
+            } else {
+                current_ctx
+            };
+
+            // Determine the decision (encoding path)
+            let decision = if low < cutoff && high >= cutoff {
+                // Need to encode a bit
+                let bit = v >= cutoff;
+                zc.encode(bit, &mut self.bitcells[current_ctx as usize])?;
+                bit
+            } else {
+                // No encoding needed - decision is determined by range
+                v >= cutoff
+            };
+
+            // Navigate to child based on decision
+            ctx_ref = if decision {
+                CtxRef::Right(current_ctx as usize)
+            } else {
+                CtxRef::Left(current_ctx as usize)
+            };
+
+            // Phase-dependent logic
+            match phase {
+                1 => {
+                    // Phase 1: Sign encoding
+                    negative = !decision;
+                    if negative {
+                        v = -v - 1;
+                        let temp = -low - 1;
+                        low = -high - 1;
+                        high = temp;
+                    }
+                    phase = 2;
+                    cutoff = 1;
+                }
+                2 => {
+                    // Phase 2: Exponential range search
+                    if !decision {
+                        // Found our range
+                        phase = 3;
+                        range = ((cutoff + 1) / 2) as u32;
+                        if range == 1 {
+                            cutoff = 0;
+                        } else {
+                            cutoff -= (range / 2) as i32;
+                        }
+                    } else {
+                        // Keep doubling
+                        cutoff += cutoff + 1;
+                    }
+                }
+                3 => {
+                    // Phase 3: Binary search within range
+                    range /= 2;
+                    if range != 1 {
+                        if !decision {
+                            cutoff -= (range / 2) as i32;
+                        } else {
+                            cutoff += (range / 2) as i32;
+                        }
+                    } else if !decision {
+                        cutoff -= 1;
+                    }
+                }
+                _ => unreachable!(),
             }
         }
 
-        // Phase 4: Sign bit for mixed ranges (already handled in Phase 1)
-        
         Ok(())
     }
 
+    /// Helper function to allocate a new context and return its pointer.
+    /// The context starts at 0 which will be allocated on first use.
+    pub fn alloc_context(&self) -> NumContext {
+        0
+    }
+}
 
+/// Legacy wrapper for compatibility with old API.
+/// This uses a simple approach that may not match DjVuLibre exactly.
+/// For full compatibility, use NumCoder directly.
+#[deprecated(note = "Use NumCoder::code_num directly for DjVuLibre compatibility")]
+pub fn encode_integer_simple<W: Write>(
+    zc: &mut ZEncoder<W>,
+    contexts: &mut [u8],
+    base_context: usize,
+    value: i32,
+    low: i32,
+    high: i32,
+) -> Result<(), Jb2Error> {
+    // This is a simplified fallback that doesn't use the tree structure
+    // It's kept for backward compatibility but should not be used for JB2
+
+    if value < low || value > high {
+        return Err(Jb2Error::InvalidNumber(format!(
+            "Value {} outside range [{}, {}]",
+            value, low, high
+        )));
+    }
+
+    if low == high {
+        return Ok(());
+    }
+
+    // For simple cases, just encode sign and magnitude
+    let mut v = value;
+    let mut lo = low;
+    let mut hi = high;
+
+    // Phase 1: Sign
+    if lo < 0 && hi >= 0 {
+        let negative = v < 0;
+        zc.encode(negative, &mut contexts[base_context])?;
+        if negative {
+            v = -v - 1;
+            let temp = -lo - 1;
+            lo = -hi - 1;
+            hi = temp;
+        }
+    } else if lo < 0 {
+        v = -v - 1;
+        let temp = -lo - 1;
+        lo = -hi - 1;
+        hi = temp;
+    }
+
+    // Phase 2 & 3: Binary encode the value
+    let mut cutoff = 1;
+    let mut ctx_idx = base_context + 1;
+
+    // Find range
+    while v >= cutoff {
+        if ctx_idx < contexts.len() {
+            zc.encode(true, &mut contexts[ctx_idx])?;
+        }
+        ctx_idx += 1;
+        cutoff = cutoff * 2 + 1;
+    }
+    if ctx_idx < contexts.len() {
+        zc.encode(false, &mut contexts[ctx_idx])?;
+    }
+
+    // Binary encode within range
+    let prev_cutoff = (cutoff - 1) / 2;
+    let mut range = prev_cutoff + 1;
+    let mut target = cutoff - 1 - range / 2;
+
+    while range > 1 {
+        range /= 2;
+        let decision = v >= target;
+        ctx_idx += 1;
+        if ctx_idx < contexts.len() {
+            zc.encode(decision, &mut contexts[ctx_idx])?;
+        }
+        if decision {
+            target += range / 2;
+        } else {
+            target -= range / 2;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_num_coder_basic() {
+        let mut coder = NumCoder::new();
+        let mut buffer = Vec::new();
+        let mut zc = ZEncoder::new(&mut buffer, false).unwrap();
+
+        // Test encoding a few values
+        let mut ctx1 = coder.alloc_context();
+        coder.code_num(&mut zc, &mut ctx1, 0, 10, 5).unwrap();
+
+        let mut ctx2 = coder.alloc_context();
+        coder.code_num(&mut zc, &mut ctx2, -10, 10, -3).unwrap();
+
+        let mut ctx3 = coder.alloc_context();
+        coder.code_num(&mut zc, &mut ctx3, 0, 262142, 1000).unwrap();
+
+        zc.finish().unwrap();
+        assert!(!buffer.is_empty());
+    }
+
+    #[test]
+    fn test_reset() {
+        let mut coder = NumCoder::new();
+        let mut buffer = Vec::new();
+        let mut zc = ZEncoder::new(&mut buffer, false).unwrap();
+
+        let mut ctx = coder.alloc_context();
+        coder.code_num(&mut zc, &mut ctx, 0, 100, 50).unwrap();
+
+        let cells_before = coder.cur_ncell;
+        coder.reset();
+
+        assert_eq!(coder.cur_ncell, 1);
+        assert!(cells_before > 1);
+    }
 }

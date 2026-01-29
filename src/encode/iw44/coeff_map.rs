@@ -42,12 +42,12 @@ impl Block {
     pub fn write_liftblock(&self, liftblock: &mut [i16; 1024]) {
         // Clear the output buffer
         liftblock.fill(0);
-        
+
         // Reconstruct coefficients in zigzag order
         for (i, &loc) in ZIGZAG_LOC.iter().enumerate() {
             let bucket_idx = (i / 16) as u8;
             let coeff_idx_in_bucket = i % 16;
-            
+
             if let Some(bucket) = self.buckets[bucket_idx as usize].as_ref() {
                 liftblock[loc] = bucket[coeff_idx_in_bucket];
             }
@@ -82,7 +82,7 @@ impl Block {
     pub fn get_coeff_at_zigzag_index(&self, zigzag_idx: usize) -> i16 {
         let bucket_idx = (zigzag_idx / 16) as u8;
         let coeff_idx_in_bucket = zigzag_idx % 16;
-        
+
         if let Some(bucket) = self.buckets[bucket_idx as usize].as_ref() {
             bucket[coeff_idx_in_bucket]
         } else {
@@ -94,7 +94,7 @@ impl Block {
     pub fn set_coeff_at_zigzag_index(&mut self, zigzag_idx: usize, value: i16) {
         let bucket_idx = (zigzag_idx / 16) as u8;
         let coeff_idx_in_bucket = zigzag_idx % 16;
-        
+
         if value == 0 {
             // If setting to zero, we might be able to clear the bucket
             if let Some(bucket) = self.buckets[bucket_idx as usize].as_mut() {
@@ -150,11 +150,11 @@ impl CoeffMap {
 
     /// Private helper to copy a 32x32 block from the transform buffer to a liftblock
     fn copy_block_data(
-        liftblock: &mut [i16; 1024], 
-        data32: &[i32], 
-        bw: usize, 
-        block_x: usize, 
-        block_y: usize
+        liftblock: &mut [i16; 1024],
+        data16: &[i16],
+        bw: usize,
+        block_x: usize,
+        block_y: usize,
     ) {
         let data_start_x = block_x * 32;
         let data_start_y = block_y * 32;
@@ -163,10 +163,10 @@ impl CoeffMap {
             let src_y = data_start_y + i;
             let src_offset = src_y * bw + data_start_x;
             let dst_offset = i * 32;
-            
-            // Convert from i32 to i16 with clamping
+
+            // Copy i16 values directly (no conversion needed, data16 is already i16)
             for j in 0..32 {
-                liftblock[dst_offset + j] = data32[src_offset + j].clamp(-32768, 32767) as i16;
+                liftblock[dst_offset + j] = data16[src_offset + j];
             }
         }
     }
@@ -176,37 +176,48 @@ impl CoeffMap {
         width: usize,
         height: usize,
         mask: Option<&GrayImage>,
-        transform_fn: F
-    ) -> Self 
-    where F: FnOnce(&mut [i32], usize, usize, usize)  // Added stride parameter
+        transform_fn: F,
+    ) -> Self
+    where
+        F: FnOnce(&mut [i16], usize, usize, usize), // Added stride parameter
     {
         let mut map = Self::new(width, height);
-        
-        // Allocate decomposition buffer (padded) - now using i32
-        let mut data32 = vec![0i32; map.bw * map.bh];
 
-        // Apply transform function to populate data32
+        // Allocate decomposition buffer (padded) - now using i16 to match C++
+        let mut data16 = vec![0i16; map.bw * map.bh];
+
+        // Apply transform function to populate data16
         // Pass actual image size (iw, ih) and stride (bw) to handle padding correctly
-        transform_fn(&mut data32, map.iw, map.ih, map.bw);
+        transform_fn(&mut data16, map.iw, map.ih, map.bw);
 
         // Apply the actual wavelet transform to convert pixels to coefficients
-        let levels = ((map.bw.min(map.bh) as f32).log2() as usize).min(5);
-        Encode::forward::<4>(&mut data32, map.bw, map.bh, map.bw, levels);
-        
+        // DjVuLibre runs the transform on the active image region (iw x ih)
+        // while using the padded rowsize (bw) for addressing.
+        // See IW44Image::Map::Encode::create():
+        //   IW44Image::Transform::Encode::forward(data16, iw, ih, bw, 1, 32);
+        let levels = ((map.iw.min(map.ih) as f32).log2() as usize).min(5);
+        Encode::forward::<4>(&mut data16, map.iw, map.ih, map.bw, levels);
+
         // DEBUG PRINT 2: After Wavelet Transform
-        println!("DEBUG: After wavelet transform for channel ({}x{}):", width, height);
-        println!("  First 16 coefficients: {:?}", &data32[0..16.min(data32.len())]);
+        println!(
+            "DEBUG: After wavelet transform for channel ({}x{}):",
+            width, height
+        );
+        println!(
+            "  First 16 coefficients: {:?}",
+            &data16[0..16.min(data16.len())]
+        );
 
         // Apply masking logic if mask is provided
         if let Some(mask_img) = mask {
             // Now masking functions work directly with i32 data
             let mask8 = masking::image_to_mask8(mask_img, map.bw, map.ih);
-            
+
             // Apply interpolate_mask to fill masked pixels with neighbor averages
-            masking::interpolate_mask(&mut data32, map.iw, map.ih, map.bw, &mask8, map.bw);
+            masking::interpolate_mask(&mut data16, map.iw, map.ih, map.bw, &mask8, map.bw);
 
             // Apply forward_mask for multiscale masked wavelet decomposition
-            masking::forward_mask(&mut data32, map.iw, map.ih, map.bw, 1, 32, &mask8, map.bw);
+            masking::forward_mask(&mut data16, map.iw, map.ih, map.bw, 1, 32, &mask8, map.bw);
         }
 
         // Copy transformed coefficients into blocks
@@ -216,8 +227,35 @@ impl CoeffMap {
                 let block_idx = block_y * blocks_w + block_x;
                 let mut liftblock = [0i16; 1024];
 
-                Self::copy_block_data(&mut liftblock, &data32, map.bw, block_x, block_y);
+                Self::copy_block_data(&mut liftblock, &data16, map.bw, block_x, block_y);
+                
+                if block_idx == 0 {
+                    if let Ok(v) = std::env::var("IW44_LIFTBLOCK_TRACE") {
+                        let v = v.trim();
+                        if !(v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false")) {
+                            eprint!("LIFTBLOCK_TRACE rust block=0 raw_liftblock[0..16]=[");
+                            for i in 0..16 {
+                                eprint!("{}{}", liftblock[i], if i == 15 { "" } else { ", " });
+                            }
+                            eprintln!("]");
+                        }
+                    }
+                }
+                
                 map.blocks[block_idx].read_liftblock(&liftblock);
+
+                if block_idx == 0 {
+                    if let Ok(v) = std::env::var("IW44_COEFFTRACE") {
+                        let v = v.trim();
+                        if !(v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false")) {
+                            if let Some(b0) = map.blocks[0].get_bucket(0) {
+                                eprintln!("COEFFTRACE rust block=0 bucket=0 coeffs={:?}", b0);
+                            } else {
+                                eprintln!("COEFFTRACE rust block=0 bucket=0 coeffs=None");
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -227,35 +265,45 @@ impl CoeffMap {
     /// Create coefficients from an image. Corresponds to `Map::Encode::create`.
     pub fn create_from_image(img: &GrayImage, mask: Option<&GrayImage>) -> Self {
         let (w, h) = img.dimensions();
-        Self::create_from_transform(w as usize, h as usize, mask, |data32, iw, ih, stride| {
-            Encode::from_u8_image_with_stride(img, data32, iw, ih, stride);
+        Self::create_from_transform(w as usize, h as usize, mask, |data16, iw, ih, stride| {
+            Encode::from_u8_image_with_stride(img, data16, iw, ih, stride);
         })
     }
 
     /// Create a CoeffMap from signed Y channel data (centered around 0)
     pub fn create_from_signed_y_buffer(
-        y_buf: &[i8], 
-        width: u32, 
-        height: u32, 
-        mask: Option<&GrayImage>
+        y_buf: &[i8],
+        width: u32,
+        height: u32,
+        mask: Option<&GrayImage>,
     ) -> Self {
-        Self::create_from_transform(width as usize, height as usize, mask, |data32, iw, ih, stride| {
-            Encode::from_i8_channel_with_stride(y_buf, data32, iw, ih, stride);
-        })
+        Self::create_from_transform(
+            width as usize,
+            height as usize,
+            mask,
+            |data16, iw, ih, stride| {
+                Encode::from_i8_channel_with_stride(y_buf, data16, iw, ih, stride);
+            },
+        )
     }
 
     /// Create a CoeffMap from signed i8 channel data (Y, Cb, or Cr)
     /// The input data should be centered around 0 (range approximately -128 to +127)
     pub fn create_from_signed_channel(
-        channel_buf: &[i8], 
-        width: u32, 
-        height: u32, 
+        channel_buf: &[i8],
+        width: u32,
+        height: u32,
         mask: Option<&GrayImage>,
-        _channel_name: &str  // Keep for API compatibility but don't use for debug
+        _channel_name: &str, // Keep for API compatibility but don't use for debug
     ) -> Self {
-        Self::create_from_transform(width as usize, height as usize, mask, |data32, iw, ih, stride| {
-            Encode::from_i8_channel_with_stride(channel_buf, data32, iw, ih, stride);
-        })
+        Self::create_from_transform(
+            width as usize,
+            height as usize,
+            mask,
+            |data16, iw, ih, stride| {
+                Encode::from_i8_channel_with_stride(channel_buf, data16, iw, ih, stride);
+            },
+        )
     }
 
     pub fn slash_res(&mut self, res: usize) {

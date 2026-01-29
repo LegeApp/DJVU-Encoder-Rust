@@ -4,10 +4,10 @@
 //! set of contexts to encode the (x, y) position of a symbol relative to the
 //! previously encoded symbol.
 
-use crate::encode::zc::ZEncoder;
 use crate::encode::jb2::error::Jb2Error;
-use crate::encode::jb2::num_coder::{NumCoder, BIG_NEGATIVE, BIG_POSITIVE};
+use crate::encode::jb2::num_coder::{NumCoder, NumContext, BIG_NEGATIVE, BIG_POSITIVE};
 use crate::encode::jb2::symbol_dict::BitImage;
+use crate::encode::zc::ZEncoder;
 use std::io::Write;
 
 /// Contexts used by the relative location predictor.
@@ -26,9 +26,11 @@ pub struct RelLocPredictor {
     last_y: i32,
     // Base index for our contexts in the main arithmetic coder.
     base_context_index: u32,
-    // Context indices for different value types
-    ctx_dy: usize,
-    ctx_dx: usize,
+    // NumContext handles for tree-based encoding
+    ctx_dy: NumContext,
+    ctx_dx: NumContext,
+    // Bit context for same-row decision
+    same_row_ctx: u8,
 }
 
 impl RelLocPredictor {
@@ -38,8 +40,9 @@ impl RelLocPredictor {
             last_x: 0,
             last_y: 0,
             base_context_index,
-            ctx_dy: base_context_index as usize + 10, // Allocate different context offsets
-            ctx_dx: base_context_index as usize + 20,
+            ctx_dy: 0,  // Will be allocated on first use
+            ctx_dx: 0,  // Will be allocated on first use
+            same_row_ctx: 0,
         }
     }
 
@@ -47,10 +50,19 @@ impl RelLocPredictor {
     pub fn reset(&mut self) {
         self.last_x = 0;
         self.last_y = 0;
+        self.ctx_dy = 0;
+        self.ctx_dx = 0;
+        self.same_row_ctx = 0;
     }
 
     /// Predicts the location of a symbol based on its context
-    pub fn predict(&self, _x: i32, _y: i32, _sym_id: usize, _dictionary: &[BitImage]) -> (i32, i32) {
+    pub fn predict(
+        &self,
+        _x: i32,
+        _y: i32,
+        _sym_id: usize,
+        _dictionary: &[BitImage],
+    ) -> (i32, i32) {
         // Simple prediction: use the last seen position
         (self.last_x, self.last_y)
     }
@@ -60,24 +72,22 @@ impl RelLocPredictor {
         &mut self,
         ac: &mut ZEncoder<W>,
         nc: &mut NumCoder,
-        contexts: &mut [u8], // Add global context array parameter
         x: i32,
         y: i32,
     ) -> Result<(), Jb2Error> {
         let same_row = y == self.last_y;
-        let context = self.base_context_index as usize + RelLocCtx::SameRow as usize;
-        ac.encode(same_row, &mut (context as u8))?;
+        ac.encode(same_row, &mut self.same_row_ctx)?;
 
         if same_row {
             // Delta X on the same row
             let dx = x - self.last_x;
-            nc.encode_integer(ac, contexts, self.ctx_dx, dx, BIG_NEGATIVE, BIG_POSITIVE)?;
+            nc.code_num(ac, &mut self.ctx_dx, BIG_NEGATIVE, BIG_POSITIVE, dx)?;
         } else {
             // New row: encode delta Y, then absolute X
             let dy = y - self.last_y;
-            nc.encode_integer(ac, contexts, self.ctx_dy, dy, BIG_NEGATIVE, BIG_POSITIVE)?;
+            nc.code_num(ac, &mut self.ctx_dy, BIG_NEGATIVE, BIG_POSITIVE, dy)?;
             // For a new row, X is coded absolutely.
-            nc.encode_integer(ac, contexts, self.ctx_dx, x, 0, BIG_POSITIVE)?;
+            nc.code_num(ac, &mut self.ctx_dx, 0, BIG_POSITIVE, x)?;
         }
 
         self.last_x = x;

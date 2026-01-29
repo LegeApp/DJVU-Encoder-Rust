@@ -3,7 +3,9 @@
 //! This module implements the BZZ compression algorithm as required by the DjVu specification.
 //! It is a port of the C++ BSByteStream implementation from DjVuLibre.
 
-use crate::encode::zc::{BitContext, ZEncoder};
+use crate::encode::zc::BitContext;
+// IMPORTANT: Always use the Rust ZEncoder for BZZ to avoid FFI writer constraints
+use crate::encode::zc::zcodec::ZEncoder as RustZEncoder;
 use crate::utils::error::{DjvuError, Result};
 use std::io::Write;
 
@@ -16,7 +18,7 @@ const FREQS0: u32 = 100000; // Thresholds for estimation speed
 const FREQS1: u32 = 1000000;
 
 pub struct BsEncoder<W: Write> {
-    zp_encoder: ZEncoder<W>,
+    zp_encoder: RustZEncoder<W>,
     buffer: Vec<u8>,
     block_size: usize,
 }
@@ -24,7 +26,7 @@ pub struct BsEncoder<W: Write> {
 impl<W: Write> BsEncoder<W> {
     pub fn new(writer: W, block_size_k: usize) -> Result<Self> {
         let block_size = (block_size_k * 1024).clamp(MIN_BLOCK_SIZE, MAX_BLOCK_SIZE);
-        let zp_encoder = ZEncoder::new(writer, true)?; // DjVu compatibility mode
+        let zp_encoder = RustZEncoder::new(writer, false)?; // Apply ZPCODER patch
         Ok(Self {
             zp_encoder,
             buffer: Vec::with_capacity(block_size + OVERFLOW),
@@ -237,10 +239,11 @@ impl<W: Write> BsEncoder<W> {
     fn encode_raw(&mut self, bits: u8, x: u32) -> Result<()> {
         println!("DEBUG BZZ: encode_raw bits={}, x={}", bits, x);
         // Write bits MSB-first, as required by DjVu spec
+        let mut raw_ctx: BitContext = 0;
         for i in (0..bits).rev() {
             let b = ((x >> i) & 1) != 0;
             println!("DEBUG BZZ: encode_raw bit={}", b);
-            self.zp_encoder.encode(b, &mut 0)?;
+            self.zp_encoder.encode(b, &mut raw_ctx)?;
         }
         Ok(())
     }
