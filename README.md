@@ -112,7 +112,7 @@ cargo build --release --features iw44-trace
 
 ## License
 
-Licensed under the MIT License. See [LICENSE](LICENSE) for details.
+Licensed under the GPL3 License. See [LICENSE](LICENSE) for details.
 
 ## Contributing
 
@@ -120,6 +120,5 @@ Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guideli
 
 ## Related Projects
 
-- [Lege](https://github.com/yourusername/lege): PDF to DjVu converter using this library
+- [Lege](https://github.com/LegeApp/Lege): PDF to DjVu converter using this library
 - [DjVuLibre](http://djvu.sourceforge.net/): Reference DjVu implementation</content>
-<parameter name="filePath">D:\Rust-projects\Lege\DJVULibRust\README.md
