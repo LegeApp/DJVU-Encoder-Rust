@@ -219,7 +219,8 @@ impl HiddenText {
         write_i16(writer, zone.bbox.w as i32)?;
         write_i16(writer, zone.bbox.h as i32)?;
 
-        write_i16(writer, text_start_offset)?;
+        // offText field: Per DjVu3 spec, this field is "Not used. Must be 0."
+        write_i16(writer, 0)?;
         write_u24(writer, zone.text_len as u32)?;
         write_u24(writer, zone.children.len() as u32)?;
 
